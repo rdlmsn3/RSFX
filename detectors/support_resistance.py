@@ -59,21 +59,43 @@ class SupportResistance:
         self,
         df: pd.DataFrame,
         pivot_lookback: int = 5,
-        pip_tolerance: float = 0.015,
+        pip_tolerance: float | None = None,
         min_touches: int = 3,
+        atr_period: int = 14,
+        atr_tolerance_mult: float = 0.3,
     ):
         """
         Parameters
         ----------
         df : DataFrame with OHLC columns
         pivot_lookback : candles each side to confirm a swing point
-        pip_tolerance : max distance (in price units) to merge pivots
+        pip_tolerance : fixed tolerance in price units (overrides ATR if set)
         min_touches : minimum touches to keep a level
+        atr_period : period for ATR calculation
+        atr_tolerance_mult : tolerance = ATR * this multiplier (adaptive)
         """
         self._df = df
         self._pivot_lookback = pivot_lookback
-        self._pip_tolerance = pip_tolerance
         self._min_touches = min_touches
+
+        # Compute ATR for adaptive tolerance
+        if pip_tolerance is not None:
+            self._pip_tolerance = pip_tolerance
+        else:
+            highs = df["high"].values
+            lows = df["low"].values
+            closes = df["close"].values
+            n = len(df)
+            # True Range
+            tr = np.maximum(
+                highs[1:] - lows[1:],
+                np.maximum(
+                    np.abs(highs[1:] - closes[:-1]),
+                    np.abs(lows[1:] - closes[:-1]),
+                )
+            )
+            atr = float(np.mean(tr[-atr_period:])) if len(tr) >= atr_period else float(np.mean(tr))
+            self._pip_tolerance = atr * atr_tolerance_mult
 
         self._closes = df["close"].values
         self._highs = df["high"].values
