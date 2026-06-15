@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RSFX Confluence Backtester</title>
+<style>
+  :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3;
+          --dim: #8b949e; --accent: #58a6ff; --green: #3fb950; --red: #f85149;
+          --yellow: #d29922; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system,
+         'Segoe UI', Helvetica, Arial, sans-serif; padding: 24px; max-width: 1200px;
+         margin: 0 auto; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .subtitle { color: var(--dim); font-size: 13px; margin-bottom: 24px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+          padding: 20px; margin-bottom: 16px; }
+  .card h2 { font-size: 14px; color: var(--dim); text-transform: uppercase;
+             letter-spacing: 0.5px; margin-bottom: 12px; }
+  label { display: block; font-size: 13px; color: var(--dim); margin-bottom: 4px; }
+  input[type="number"], input[type="text"], select {
+    background: var(--bg); border: 1px solid var(--border);
+    color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 14px;
+    width: 100%; outline: none; }
+  input:focus, select:focus { border-color: var(--accent); }
+  .row { display: flex; gap: 16px; margin-bottom: 12px; }
+  .row > div { flex: 1; }
+  button { background: #238636; color: #fff; border: none; padding: 10px 24px;
+    border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer;
+    width: 100%; margin-top: 8px; }
+  button:hover { background: #2ea043; }
+  button:disabled { background: var(--border); cursor: not-allowed; }
+  .btn-sm { width: auto; padding: 4px 10px; font-size: 12px; border-radius: 4px;
+            font-weight: 500; cursor: pointer; border: 1px solid var(--border);
+            background: var(--bg); color: var(--text); }
+  .btn-sm:hover { border-color: var(--accent); color: var(--accent); }
+  .status { margin-top: 12px; font-size: 13px; color: var(--dim); display: none; }
+  .status.active { display: block; }
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite;
+    vertical-align: middle; margin-right: 8px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .saved-hint { font-size: 11px; color: var(--dim); margin-top: 4px; }
+  .saved-hint .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--green); margin-right: 4px; vertical-align: middle; }
+
+  /* Strategy Selector */
+  .strat-selector { position: relative; }
+  .strat-search { width: 100%; background: var(--bg); border: 1px solid var(--border);
+    color: var(--text); padding: 8px 12px 8px 32px; border-radius: 6px; font-size: 14px;
+    outline: none; }
+  .strat-search:focus { border-color: var(--accent); }
+  .strat-search-icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+    color: var(--dim); font-size: 14px; pointer-events: none; }
+  .strat-selected { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; min-height: 28px; }
+  .strat-tag { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px;
+    background: rgba(88,166,255,0.15); color: var(--accent); border-radius: 4px;
+    font-size: 12px; font-weight: 500; }
+  .strat-tag .x { cursor: pointer; opacity: 0.6; font-size: 14px; line-height: 1; }
+  .strat-tag .x:hover { opacity: 1; }
+  .strat-list { max-height: 220px; overflow-y: auto; border: 1px solid var(--border);
+    border-radius: 6px; margin-top: 4px; }
+  .strat-list::-webkit-scrollbar { width: 6px; }
+  .strat-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .strat-item { display: flex; align-items: center; padding: 6px 12px; cursor: pointer;
+    font-size: 13px; gap: 8px; border-bottom: 1px solid rgba(48,54,61,0.5); }
+  .strat-item:hover { background: rgba(88,166,255,0.05); }
+  .strat-item.selected { background: rgba(88,166,255,0.1); }
+  .strat-item .cb { width: 14px; height: 14px; border: 1px solid var(--border);
+    border-radius: 3px; display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; font-size: 10px; }
+  .strat-item.selected .cb { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .strat-item .name { flex: 1; }
+  .strat-item .tfs { color: var(--dim); font-size: 11px; }
+  .strat-count { font-size: 12px; color: var(--dim); margin-top: 4px; }
+
+  /* File info bar */
+  .file-info { display: flex; align-items: center; gap: 12px; padding: 8px 12px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    margin-top: 8px; font-size: 12px; color: var(--dim); }
+  .file-info .icon { font-size: 16px; }
+  .file-info .detail { color: var(--text); }
+
+  /* Results */
+  .results { display: none; }
+  .results.visible { display: block; }
+  .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+  .stat { text-align: center; }
+  .stat .val { font-size: 28px; font-weight: 700; }
+  .stat .lbl { font-size: 12px; color: var(--dim); margin-top: 2px; }
+  .stat .val.pos { color: var(--green); }
+  .stat .val.neg { color: var(--red); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--dim); font-weight: 500; padding: 8px 12px;
+       border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--card); }
+  td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  tr:hover td { background: rgba(88,166,255,0.05); }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px;
+         font-weight: 600; }
+  .tag-long { background: rgba(63,185,80,0.15); color: var(--green); }
+  .tag-short { background: rgba(248,81,73,0.15); color: var(--red); }
+  .tag-tp { background: rgba(63,185,80,0.15); color: var(--green); }
+  .tag-sl { background: rgba(248,81,73,0.15); color: var(--red); }
+  .tag-eod { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .trades-wrap { max-height: 500px; overflow-y: auto; }
+  .trades-wrap::-webkit-scrollbar { width: 6px; }
+  .trades-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<h1>⚡ RSFX Confluence Backtester</h1>
+<p class="subtitle">Signal-buffer confluence — multiple strategies, majority vote entry</p>
+
+<div class="card">
+  <h2>Configuration</h2>
+
+  <!-- Data Source -->
+  <div class="row">
+    <div>
+      <label>Data File</label>
+      <select id="csvFile" onchange="onFileChange()"></select>
+    </div>
+    <div>
+      <label>Symbol</label>
+      <input type="text" id="symbol" value="USDJPY" placeholder="USDJPY">
+    </div>
+  </div>
+  <div class="file-info" id="fileInfo">
+    <span class="icon">📁</span>
+    <span id="fileDetail">Loading files...</span>
+  </div>
+
+  <!-- Strategies -->
+  <div style="margin-top: 16px;">
+    <label>Strategies</label>
+    <div class="strat-selector">
+      <span class="strat-search-icon">🔍</span>
+      <input type="text" class="strat-search" id="stratSearch" placeholder="Search strategies..." autocomplete="off">
+      <div class="strat-selected" id="stratTags"></div>
+      <div class="strat-list" id="stratList"></div>
+      <div class="strat-count" id="stratCount"></div>
+    </div>
+    <div style="margin-top: 8px; display: flex; gap: 6px;">
+      <button class="btn-sm" onclick="selectAll()">All</button>
+      <button class="btn-sm" onclick="selectPreset('top3')">Top 3</button>
+      <button class="btn-sm" onclick="selectPreset('h1')">H1 Trend</button>
+      <button class="btn-sm" onclick="selectPreset('divergence')">Divergence</button>
+      <button class="btn-sm" onclick="clearAll()">Clear</button>
+    </div>
+  </div>
+
+  <!-- Parameters -->
+  <div class="row" style="margin-top: 16px;">
+    <div>
+      <label>Lookback (candle window)</label>
+      <input type="number" id="lookback" value="5" min="1" max="50">
+    </div>
+    <div>
+      <label>Threshold (min agreements)</label>
+      <input type="number" id="threshold" value="2" min="2" max="10">
+    </div>
+  </div>
+
+  <button id="runBtn" onclick="runBacktest()">▶ Run Backtest</button>
+  <div class="saved-hint" id="savedHint"></div>
+  <div id="status" class="status"></div>
+</div>
+
+<div id="results" class="results">
+  <div class="card">
+    <h2>Summary</h2>
+    <div class="stat-grid" id="stats"></div>
+  </div>
+
+  <div class="card">
+    <h2>Trades</h2>
+    <div class="trades-wrap">
+      <table id="tradesTable">
+        <thead>
+          <tr>
+            <th>#</th><th>Entry Time</th><th>Dir</th><th>Entry</th><th>TP</th>
+            <th>SL</th><th>Exit</th><th>PnL</th><th>MAE</th><th>MFE</th>
+            <th>Bars</th><th>Exit</th><th>Strategies</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Strategy Participation</h2>
+    <div id="participation"></div>
+  </div>
+</div>
+
+<script>
+const API = '';
+const STORAGE_KEY = 'rsfx_confluence_state';
+let allStrategies = [];
+let allFiles = [];
+let selected = new Set();
+
+// ── LocalStorage ─────────────────────────────────────────────────
+function saveState() {
+  const state = {
+    strategies: [...selected],
+    lookback: document.getElementById('lookback').value,
+    threshold: document.getElementById('threshold').value,
+    csvFile: document.getElementById('csvFile').value,
+    symbol: document.getElementById('symbol').value,
+  };
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  showSaved();
+}
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch { return null; }
+}
+
+function showSaved() {
+  const el = document.getElementById('savedHint');
+  el.innerHTML = '<span class="dot"></span>Settings saved to browser';
+  setTimeout(() => { el.innerHTML = ''; }, 2000);
+}
+
+// ── Load from server ─────────────────────────────────────────────
+Promise.all([
+  fetch(`${API}/strategies`).then(r => r.json()),
+  fetch(`${API}/files`).then(r => r.json()),
+]).then(([stratData, fileData]) => {
+  allStrategies = stratData.strategies;
+  allFiles = fileData.files;
+  renderFileList();
+  renderList();
+
+  // Restore saved state or defaults
+  const saved = loadState();
+  if (saved) {
+    if (saved.csvFile) document.getElementById('csvFile').value = saved.csvFile;
+    if (saved.symbol) document.getElementById('symbol').value = saved.symbol;
+    if (saved.lookback) document.getElementById('lookback').value = saved.lookback;
+    if (saved.threshold) document.getElementById('threshold').value = saved.threshold;
+    if (saved.strategies && saved.strategies.length) {
+      selected = new Set(saved.strategies);
+    } else {
+      selectPreset('top3');
+    }
+    onFileChange();
+    renderList();
+  } else {
+    selectPreset('top3');
+  }
+});
+
+// ── File selector ────────────────────────────────────────────────
+function renderFileList() {
+  const sel = document.getElementById('csvFile');
+  sel.innerHTML = allFiles.map(f =>
+    `<option value="${f.name}">${f.name} (${f.size_mb} MB)</option>`
+  ).join('');
+  onFileChange();
+}
+
+function onFileChange() {
+  const name = document.getElementById('csvFile').value;
+  const file = allFiles.find(f => f.name === name);
+  const detail = document.getElementById('fileDetail');
+  if (file) {
+    detail.innerHTML = `<span class="detail">${file.name}</span> — ${file.size_mb} MB — ${file.path}`;
+  }
+  saveState();
+}
+
+// ── Search / filter ──────────────────────────────────────────────
+document.getElementById('stratSearch').addEventListener('input', renderList);
+
+// Save on any input change
+['lookback', 'threshold', 'symbol'].forEach(id => {
+  document.getElementById(id).addEventListener('change', saveState);
+});
+
+function renderList() {
+  const q = document.getElementById('stratSearch').value.toLowerCase();
+  const list = document.getElementById('stratList');
+  const filtered = allStrategies.filter(s =>
+    s.name.toLowerCase().includes(q) || s.timeframes.some(t => t.toLowerCase().includes(q))
+  );
+
+  list.innerHTML = filtered.map(s => {
+    const sel = selected.has(s.name) ? 'selected' : '';
+    return `<div class="strat-item ${sel}" onclick="toggle('${s.name}')">
+      <div class="cb">${selected.has(s.name) ? '✓' : ''}</div>
+      <div class="name">${highlight(s.name, q)}</div>
+      <div class="tfs">${s.timeframes.join(', ')}</div>
+    </div>`;
+  }).join('');
+
+  renderTags();
+  document.getElementById('stratCount').textContent =
+    `${selected.size} selected / ${allStrategies.length} total`;
+}
+
+function highlight(name, q) {
+  if (!q) return name;
+  const i = name.toLowerCase().indexOf(q);
+  if (i < 0) return name;
+  return name.slice(0, i) + '<b style="color:var(--accent)">' + name.slice(i, i + q.length) + '</b>' + name.slice(i + q.length);
+}
+
+// ── Toggle select ────────────────────────────────────────────────
+function toggle(name) {
+  if (selected.has(name)) selected.delete(name);
+  else selected.add(name);
+  renderList();
+  saveState();
+}
+
+function selectAll() {
+  allStrategies.forEach(s => selected.add(s.name));
+  renderList();
+  saveState();
+}
+
+function clearAll() {
+  selected.clear();
+  renderList();
+  saveState();
+}
+
+function selectPreset(preset) {
+  selected.clear();
+  const presets = {
+    'top3': ['tweezer_reversal', 'h1_trend_m5_rsi', 'cci_ema'],
+    'h1': allStrategies.filter(s => s.name.startsWith('h1_')).map(s => s.name),
+    'divergence': allStrategies.filter(s => s.name.includes('divergence')).map(s => s.name),
+  };
+  (presets[preset] || []).forEach(n => selected.add(n));
+  renderList();
+  saveState();
+}
+
+// ── Tags ─────────────────────────────────────────────────────────
+function renderTags() {
+  const el = document.getElementById('stratTags');
+  el.innerHTML = [...selected].sort().map(n =>
+    `<span class="strat-tag">${n} <span class="x" onclick="event.stopPropagation(); toggle('${n}')">×</span></span>`
+  ).join('');
+}
+
+// ── Run backtest ─────────────────────────────────────────────────
+async function runBacktest() {
+  const btn = document.getElementById('runBtn');
+  const status = document.getElementById('status');
+  const strats = [...selected];
+
+  if (strats.length < 2) {
+    status.className = 'status active';
+    status.textContent = '⚠ Select at least 2 strategies';
+    return;
+  }
+
+  const lookback = parseInt(document.getElementById('lookback').value);
+  const threshold = parseInt(document.getElementById('threshold').value);
+  const csvFile = document.getElementById('csvFile').value;
+  const symbol = document.getElementById('symbol').value.trim() || 'USDJPY';
+
+  if (threshold > strats.length) {
+    status.className = 'status active';
+    status.textContent = `⚠ Threshold (${threshold}) can't exceed strategy count (${strats.length})`;
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Running...';
+  status.className = 'status active';
+  status.innerHTML = `<span class="spinner"></span>Running ${strats.length} strategies on ${csvFile} (lb=${lookback}, t=${threshold})... ~40s`;
+
+  try {
+    const resp = await fetch(`${API}/run`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ strategies: strats, lookback, threshold, csv_file: csvFile, symbol })
+    });
+    const data = await resp.json();
+    if (data.error) {
+      status.textContent = `❌ ${data.error}`;
+      return;
+    }
+    const r = data.result;
+    status.innerHTML = `✅ Done in ${data.elapsed}s — ${r.total_trades} trades, ${r.n_candles?.toLocaleString()} candles, ${r.total_pnl_pips > 0 ? '+' : ''}${r.total_pnl_pips} pips`;
+    renderResults(data);
+  } catch (e) {
+    status.textContent = `❌ ${e.message}`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '▶ Run Backtest';
+  }
+}
+
+// ── Render results ───────────────────────────────────────────────
+function renderResults(data) {
+  document.getElementById('results').classList.add('visible');
+  const r = data.result;
+  const pnlClass = r.total_pnl_pips >= 0 ? 'pos' : 'neg';
+
+  document.getElementById('stats').innerHTML = `
+    <div class="stat"><div class="val">${r.total_trades}</div><div class="lbl">Trades</div></div>
+    <div class="stat"><div class="val ${pnlClass}">${r.total_pnl_pips > 0 ? '+' : ''}${r.total_pnl_pips.toFixed(1)}</div><div class="lbl">PnL (pips)</div></div>
+    <div class="stat"><div class="val">${r.win_rate.toFixed(1)}%</div><div class="lbl">Win Rate</div></div>
+    <div class="stat"><div class="val">${r.profit_factor.toFixed(2)}</div><div class="lbl">Profit Factor</div></div>
+  `;
+
+  const tbody = document.querySelector('#tradesTable tbody');
+  tbody.innerHTML = data.trades.map((t, i) => {
+    const dirClass = t.direction === 'LONG' ? 'tag-long' : 'tag-short';
+    const exitClass = t.exit_reason === 'TP' ? 'tag-tp' : t.exit_reason === 'SL' ? 'tag-sl' : 'tag-eod';
+    const pnlColor = t.pnl_pips >= 0 ? 'var(--green)' : 'var(--red)';
+    return `<tr>
+      <td>${i+1}</td>
+      <td style="font-size:12px;white-space:nowrap">${t.entry_time}</td>
+      <td><span class="tag ${dirClass}">${t.direction}</span></td>
+      <td>${t.entry_price.toFixed(5)}</td>
+      <td>${t.take_profit.toFixed(5)}</td>
+      <td>${t.stop_loss.toFixed(5)}</td>
+      <td>${t.exit_price ? t.exit_price.toFixed(5) : '-'}</td>
+      <td style="color:${pnlColor}">${t.pnl_pips > 0 ? '+' : ''}${t.pnl_pips.toFixed(1)}</td>
+      <td style="color:var(--red)">${t.mae_pips.toFixed(1)}</td>
+      <td style="color:var(--green)">${t.mfe_pips.toFixed(1)}</td>
+      <td>${t.bars_held}</td>
+      <td><span class="tag ${exitClass}">${t.exit_reason}</span></td>
+      <td style="font-size:11px;max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${t.strategies}</td>
+    </tr>`;
+  }).join('');
+
+  // Participation
+  const counts = {};
+  data.trades.forEach(t => {
+    t.strategies.split(' + ').forEach(s => { counts[s] = (counts[s] || 0) + 1; });
+  });
+  const sorted = Object.entries(counts).sort((a,b) => b[1] - a[1]);
+  const max = sorted.length ? sorted[0][1] : 1;
+  document.getElementById('participation').innerHTML = sorted.map(([name, count]) => {
+    const pct = (count / data.trades.length * 100).toFixed(1);
+    return `<div style="display:flex;align-items:center;margin:4px 0">
+      <div style="width:200px;font-size:13px;text-align:right;padding-right:12px;color:var(--dim)">${name}</div>
+      <div style="flex:1;background:var(--bg);border-radius:4px;height:20px;position:relative">
+        <div style="width:${(count/max*100).toFixed(0)}%;background:var(--accent);border-radius:4px;height:100%;opacity:0.6"></div>
+      </div>
+      <div style="width:80px;font-size:12px;padding-left:8px">${count} (${pct}%)</div>
+    </div>`;
+  }).join('');
+}
+</script>
+</body>
+</html>

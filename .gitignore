@@ -1,0 +1,28 @@
+# Generated backtest outputs
+bt_*.csv
+bt_trades_*.csv
+backtest_results.csv
+backtest_trades.csv
+backtest_results_latest.csv
+backtest_trades_latest.csv
+backtest_output.txt
+
+# Correlation outputs
+corr_*.csv
+
+# Portfolio outputs
+portfolio_results.csv
+portfolio_top50.csv
+
+# Confluence outputs
+confluence_*.csv
+confluence_results_latest.csv
+confluence_trades_latest.csv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Data (large CSVs — keep out of git)
+data/DAT_*.csv
