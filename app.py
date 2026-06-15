@@ -38,6 +38,13 @@ from core.market_data_store import MarketDataStore
 from core.event_bus import EventBus
 from core.playback_controller import PlaybackController
 from detectors.pattern_detector import PatternDetector
+from detectors.strategies import (
+    EMAStochasticMTFStrategy,
+    STRATEGY_REGISTRY,
+    CATEGORY_ORDER,
+    CATEGORY_DESCRIPTIONS,
+    get_strategy_class,
+)
 from core.trade_engine import TradeEngine
 from views.chart_renderer import ChartRenderer
 
@@ -151,7 +158,7 @@ st.markdown("""
 # ---------------------------------------------------------------------------
 DEFAULT_CSV   = str(Path(__file__).parent / "data" / "DAT_ASCII_USDJPY_M1_202605.csv")
 TIMEFRAMES    = ["M1", "M5", "H1", "D1"]
-SPEEDS        = {"0.5×": 2.0, "1×": 1.0, "2×": 0.5, "5×": 0.2, "10×": 0.1, "MAX": 0.0}
+SPEEDS        = {"0.5×": 2.0, "1×": 1.0, "2×": 0.5, "5×": 0.2, "10×": 0.1, "20×": 0.05, "50×": 0.02, "MAX": 0.0}
 CHART_LOOKBACK = 100    # candles rendered at once
 
 
@@ -196,7 +203,8 @@ def _load_data(csv_path: str, symbol: str) -> bool:
 
             bus     = EventBus()
             ctrl    = PlaybackController(bus, store, symbol=symbol)
-            det     = PatternDetector(bus, store, symbol=symbol)
+            strategy = EMAStochasticMTFStrategy()
+            det     = PatternDetector(bus, store, symbol=symbol, strategy=strategy)
             te      = TradeEngine(bus, symbol=symbol)
 
             # Emit the first tick so the chart has data immediately
@@ -250,6 +258,77 @@ def _render_sidebar() -> None:
         if not st.session_state.data_loaded:
             st.info("Load a CSV file to begin.")
             return
+
+        # ---- Strategy Selection ---------------------------------------------
+        st.markdown("### Strategy")
+
+        # Filter out existing strategies from category list (they're legacy)
+        available_categories = [c for c in CATEGORY_ORDER if c not in ("Single TF - Existing", "Two TF - Existing")]
+
+        # Category dropdown
+        selected_category = st.selectbox(
+            "Category",
+            options=available_categories,
+            index=0,
+            label_visibility="collapsed",
+        )
+
+        # Get strategies in this category
+        category_strategies = [
+            name for name, info in STRATEGY_REGISTRY.items()
+            if info["category"] == selected_category
+        ]
+
+        if category_strategies:
+            # Strategy dropdown
+            selected_strategy = st.selectbox(
+                "Strategy",
+                options=category_strategies,
+                index=0,
+                label_visibility="collapsed",
+            )
+
+            # Show description
+            st.caption(STRATEGY_REGISTRY[selected_strategy]["description"])
+
+            # Dynamic parameter controls
+            st.markdown("#### Parameters")
+            params = {}
+            for param_name, param_info in STRATEGY_REGISTRY[selected_strategy]["params"].items():
+                if param_info["type"] == "int":
+                    params[param_name] = st.slider(
+                        param_name,
+                        min_value=param_info["min"],
+                        max_value=param_info["max"],
+                        value=param_info["default"],
+                    )
+                elif param_info["type"] == "float":
+                    params[param_name] = st.slider(
+                        param_name,
+                        min_value=float(param_info["min"]),
+                        max_value=float(param_info["max"]),
+                        value=float(param_info["default"]),
+                        step=0.1,
+                    )
+
+            # Auto-apply strategy on selection change
+            if selected_strategy != st.session_state.get("active_strategy"):
+                strategy_class = get_strategy_class(selected_strategy)
+                new_strategy = strategy_class(**params)
+                st.session_state.detector.strategy = new_strategy
+                st.session_state.active_strategy = selected_strategy
+                st.rerun()
+
+            # Auto-apply on param change
+            current_params = st.session_state.get("strategy_params", {})
+            if params != current_params:
+                strategy_class = get_strategy_class(selected_strategy)
+                new_strategy = strategy_class(**params)
+                st.session_state.detector.strategy = new_strategy
+                st.session_state.strategy_params = params
+                st.rerun()
+
+        st.markdown("---")
 
         # ---- Timeframe ----------------------------------------------------
         st.markdown("### Chart Timeframe")
@@ -353,15 +432,23 @@ def _render_status() -> None:
     )
     st.markdown(badge, unsafe_allow_html=True)
 
+    # Strategy info row
+    active_strategy = getattr(st.session_state, 'active_strategy', 'ema_stochastic_mtf')
+    strategy_info = STRATEGY_REGISTRY.get(active_strategy, {})
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Strategy", active_strategy.replace("_", " ").title())
+    c2.metric("Timeframes", ", ".join(strategy_info.get("timeframes", ["M1", "M5", "H1"])))
+    c3.metric("Category", strategy_info.get("category", "Two TF - Existing"))
+
     # Metrics row
-    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Symbol",    sym)
     c2.metric("Timeframe", tf)
     c3.metric("Timestamp", str(ts)[:16] if ts else "—")
     c4.metric("Candle #",  f"{ctrl.current_index + 1:,} / {total:,}")
     c5.metric("Remaining", f"{ctrl.bars_remaining:,}")
     c6.metric("Patterns",  det.signal_count)
-    c7.metric("Trades",    te.trade_count)
 
 
 # ===========================================================================
@@ -374,26 +461,63 @@ def _render_chart() -> None:
     det:   PatternDetector    = st.session_state.detector
     te:    TradeEngine        = st.session_state.trade_engine
     sym    = st.session_state.symbol
-    tf     = st.session_state.timeframe
 
     ts = ctrl.current_timestamp
     if ts is None:
         st.info("No data to display.")
         return
 
-    # Fetch display window through the store (no copying full DataFrame)
-    window = store.get_window(sym, tf, ts, lookback=CHART_LOOKBACK)
+    # Render each timeframe as a separate chart
+    for tf in ["M1", "M5", "H1"]:
+        try:
+            window = store.get_window(sym, tf, ts, lookback=CHART_LOOKBACK)
+        except KeyError:
+            continue
+        if window.empty:
+            continue
 
-    fig = ChartRenderer.render_chart(
-        market_data=window,
-        patterns=det.signals,
-        trades=te.open_positions + te.closed_positions,
-        symbol=sym,
-        timeframe=tf,
-        max_candles=CHART_LOOKBACK,
+        # Only show L/S markers on M1 (entry timeframe)
+        patterns_for_tf = det.signals if tf == "M1" else None
+        trades_for_tf = (te.open_positions + te.closed_positions) if tf == "M1" else None
+
+        fig = ChartRenderer.render_chart(
+            market_data=window,
+            patterns=patterns_for_tf,
+            trades=trades_for_tf,
+            symbol=sym,
+            timeframe=tf,
+            max_candles=CHART_LOOKBACK,
+        )
+        st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+
+
+def _render_signals() -> None:
+    """Render signal history table below the charts."""
+    det: PatternDetector = st.session_state.detector
+
+    if det.signal_count == 0:
+        return
+
+    st.markdown("### Signals")
+
+    # Build signals DataFrame
+    signals_data = []
+    for s in det.signals:
+        signals_data.append({
+            "Time": str(s.end_time)[:16],
+            "Direction": s.metadata.get("direction", "?"),
+            "Strategy": s.metadata.get("strategy", "?"),
+            "Confidence": f"{s.confidence:.2f}",
+            "Details": ", ".join(f"{k}={v}" for k, v in s.metadata.items()
+                                if k not in ("strategy", "direction") and not k.startswith("candle")),
+        })
+
+    signals_df = pd.DataFrame(signals_data)
+    st.dataframe(
+        signals_df,
+        use_container_width=True,
+        height=min(300, 35 + len(signals_df) * 35),
     )
-
-    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
 
 
 # ===========================================================================
@@ -421,6 +545,9 @@ def main() -> None:
 
     # ---- Chart ------------------------------------------------------------
     _render_chart()
+
+    # ---- Signal History ---------------------------------------------------
+    _render_signals()
 
     # ---- Playback loop: advance one tick per rerun while playing ----------
     ctrl: PlaybackController = st.session_state.controller

@@ -1,43 +1,30 @@
 """
 detectors/pattern_detector.py
 ------------------------------
-Strategy-based pattern detection.
+Strategy-based pattern detection with multi-timeframe support.
 
-Generates Long/Short signals using:
-- Trend: 9 EMA vs 21 EMA
-- Momentum: Fast Stochastic oversold/overbought
-- Candlestick triggers: Engulfing, Hammer, Shooting Star
+Delegates evaluation to a pluggable BaseStrategy instance.
+Fetches M1/M5/H1 windows and passes all to the strategy.
+Generates signals with "direction" in metadata (LONG / SHORT).
 """
 
 from __future__ import annotations
 import logging
-from dataclasses import dataclass, field
-from typing import Optional, TYPE_CHECKING
+from typing import Optional
 
 import pandas as pd
-import numpy as np
-
-try:
-    import talib
-    TA_AVAILABLE = True
-except ImportError:
-    TA_AVAILABLE = False
-    logging.warning("TA-Lib not installed. Strategy signals disabled.")
 
 from core.event_bus import EventBus
 from core.events import MarketTickEvent, PatternDetectedEvent
 from core.market_data_store import MarketDataStore
+from detectors.signal import PatternSignal
+from detectors.strategies.base import BaseStrategy
+from detectors.strategies.ema_stochastic import EMAStochasticStrategy
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class PatternSignal:
-    name: str
-    start_time: pd.Timestamp
-    end_time: pd.Timestamp
-    confidence: float
-    metadata: dict = field(default_factory=dict)
+# Timeframes fetched for MTF strategies (order matters: finest → coarsest)
+MTF_TIMEFRAMES: list[str] = ["M1", "M5", "H1"]
 
 
 class PatternDetector:
@@ -47,19 +34,37 @@ class PatternDetector:
         data_store: MarketDataStore,
         symbol: str = "EURUSD",
         lookback: int = 200,
+        strategy: Optional[BaseStrategy] = None,
     ) -> None:
         self._bus = event_bus
         self._store = data_store
         self._symbol = symbol
         self._lookback = lookback
+        self._strategy = strategy or EMAStochasticStrategy()
 
         self._signals: list[PatternSignal] = []
         self._bus.subscribe(MarketTickEvent, self._on_market_tick)
 
-        if not TA_AVAILABLE:
-            logger.warning("TA-Lib not installed – no signals will be generated.")
+        logger.info(
+            "PatternDetector initialised (strategy=%s, lookback=%d).",
+            self._strategy.name,
+            lookback,
+        )
 
-        logger.info("Strategy detector initialised (lookback=%d).", lookback)
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    @property
+    def strategy(self) -> BaseStrategy:
+        return self._strategy
+
+    @strategy.setter
+    def strategy(self, new_strategy: BaseStrategy) -> None:
+        """Hot-swap strategy at runtime."""
+        self._strategy = new_strategy
+        self._signals.clear()
+        logger.info("Strategy swapped to %s", new_strategy.name)
 
     @property
     def signals(self) -> list[PatternSignal]:
@@ -73,105 +78,42 @@ class PatternDetector:
         self._signals.clear()
 
     # ------------------------------------------------------------------
-    # Core strategy logic
+    # Core: fetch windows + delegate to strategy
     # ------------------------------------------------------------------
+
+    def _fetch_windows(self, timestamp: pd.Timestamp) -> dict[str, pd.DataFrame]:
+        """
+        Fetch M1/M5/H1 windows up to current timestamp.
+        Missing TFs are silently omitted (strategy decides what's required).
+        """
+        windows: dict[str, pd.DataFrame] = {}
+        for tf in MTF_TIMEFRAMES:
+            try:
+                windows[tf] = self._store.get_window(
+                    symbol=self._symbol,
+                    timeframe=tf,
+                    current_timestamp=timestamp,
+                    lookback=self._lookback,
+                )
+            except KeyError:
+                logger.debug("TF %s not available for %s, skipping.", tf, self._symbol)
+        return windows
 
     def scan_for_patterns(
         self,
-        window: pd.DataFrame,
+        windows: dict[str, pd.DataFrame],
         current_timestamp: pd.Timestamp,
     ) -> list[PatternSignal]:
-        """
-        Evaluate the strategy on the latest candle and return a signal if conditions match.
-        """
-        detected = []
-        if not TA_AVAILABLE or len(window) < 22:  # need at least 22 for 21 EMA
-            return detected
-
-        # Convert to numpy arrays for TA-Lib
-        close = window["close"].values.astype(np.float64)
-        high = window["high"].values.astype(np.float64)
-        low = window["low"].values.astype(np.float64)
-        open_p = window["open"].values.astype(np.float64)
-
-        # --- 1. Trend: 9 EMA and 21 EMA ---
-        ema9 = talib.EMA(close, timeperiod=9)
-        ema21 = talib.EMA(close, timeperiod=21)
-        uptrend = ema9[-1] > ema21[-1]
-        downtrend = ema9[-1] < ema21[-1]
-
-        # --- 2. Fast Stochastic (5,3) ---
-        # fastk_period=5, fastd_period=3
-        fastk, _ = talib.STOCHF(high, low, close, fastk_period=5, fastd_period=3)
-        # Check oversold/overbought within last 2 candles (current or previous)
-        oversold_last2 = (fastk[-1] < 20) or (fastk[-2] < 20)
-        overbought_last2 = (fastk[-1] > 80) or (fastk[-2] > 80)
-
-        # --- 3. Candlestick triggers (only at the current candle) ---
-        # Bullish triggers
-        bullish_engulfing = talib.CDLENGULFING(open_p, high, low, close)
-        hammer = talib.CDLHAMMER(open_p, high, low, close)
-        is_bullish = (bullish_engulfing[-1] == 100) or (hammer[-1] == 100)
-
-        # Bearish triggers
-        bearish_engulfing = talib.CDLENGULFING(open_p, high, low, close)
-        shooting_star = talib.CDLSHOOTINGSTAR(open_p, high, low, close)
-        is_bearish = (bearish_engulfing[-1] == -100) or (shooting_star[-1] == -100)
-
-        # --- Generate signals ---
-        if uptrend and oversold_last2 and is_bullish:
-            detected.append(PatternSignal(
-                name="STRATEGY_LONG",
-                start_time=window.index[-1],
-                end_time=window.index[-1],
-                confidence=1.0,
-                metadata = {
-                    "direction": "LONG",
-                    "trend": "up" if uptrend else "down",
-                    "ema9": ema9[-1],
-                    "ema21": ema21[-1],
-                    "stoch_fastk": fastk[-1],
-                    "stoch_oversold_last2": oversold_last2,
-                    "candle_trigger_idx": window.index[-1],   # the candle that fired
-                    "pattern": "bullish_engulfing" if bullish_engulfing[-1] == 100 else "hammer"
-                }
-            ))
-            logger.info("LONG signal at %s", current_timestamp)
-
-        elif downtrend and overbought_last2 and is_bearish:
-            detected.append(PatternSignal(
-                name="STRATEGY_SHORT",
-                start_time=window.index[-1],
-                end_time=window.index[-1],
-                confidence=1.0,
-                metadata = {
-                    "direction": "SHORT",
-                    "trend": "down",
-                    "ema9": ema9[-1],
-                    "ema21": ema21[-1],
-                    "stoch_fastk": fastk[-1],
-                    "stoch_overbought": overbought_last2,
-                    "candle_trigger_idx": window.index[-1],   # the candle that fired
-                    "pattern": "bearish_candle"
-                }
-            ))
-            logger.info("SHORT signal at %s", current_timestamp)
-
-        return detected
+        return self._strategy.evaluate(windows, current_timestamp)
 
     # ------------------------------------------------------------------
     # Event handler
     # ------------------------------------------------------------------
 
     def _on_market_tick(self, event: MarketTickEvent) -> None:
-        window = self._store.get_window(
-            symbol=event.symbol,
-            timeframe="M1",
-            current_timestamp=event.timestamp,
-            lookback=self._lookback,
-        )
+        windows = self._fetch_windows(event.timestamp)
 
-        new_signals = self.scan_for_patterns(window, event.timestamp)
+        new_signals = self.scan_for_patterns(windows, event.timestamp)
 
         for signal in new_signals:
             self._signals.append(signal)

@@ -1,0 +1,2 @@
+rank,rank,strategy,total_trades,win_rate,total_pnl_pips,avg_pnl_pips,profit_factor,max_drawdown_pct,gross_profit,gross_loss
+1,0,ema_rsi_cross,49,32.6530612244898,-44.91,-0.92,0.77,1.0,151.04,195.95

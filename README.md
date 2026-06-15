@@ -153,11 +153,12 @@ Register it in `app.py` during `_load_data()` – zero changes to any other modu
 | MarketDataStore (M1/M5/H1/D1) | ✅ |
 | EventBus | ✅ |
 | PlaybackController | ✅ |
-| PatternDetector (placeholder) | ✅ |
+| PatternDetector (pluggable strategy) | ✅ |
 | TradeEngine (placeholder) | ✅ |
-| ChartRenderer | ✅ |
+| ChartRenderer (3 stacked subplots) | ✅ |
 | Streamlit UI | ✅ |
-| Candlestick pattern recognition | 🔜 |
+| MTF Strategy (H1 trend + M5 momentum + M1 entry) | ✅ |
+| Candlestick pattern recognition | ✅ (via TA-Lib) |
 | Support/Resistance detection | 🔜 |
 | ML model integration | 🔜 |
 | Strategy Engine | 🔜 |
