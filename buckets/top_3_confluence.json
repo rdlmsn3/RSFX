@@ -8,6 +8,8 @@
   "use_sr": true,
   "lookback": 5,
   "threshold": 2,
+  "csv_file": "DAT_ASCII_USDJPY_M1_202605.csv",
+  "symbol": "USDJPY",
   "description": "Auto-saved from confluence backtest on DAT_ASCII_USDJPY_M1_202605.csv",
   "created": "2026-06-15",
   "backtest_result": {

@@ -32,7 +32,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.data_loader import HistDataAdapter
+from core.data_loader import HistDataAdapter, TickDataAdapter
 from core.market_data_store import MarketDataStore
 from detectors.strategies.registry import STRATEGY_REGISTRY, _populate_registry
 from detectors.strategies.base import BaseStrategy
@@ -45,6 +45,7 @@ from backtest.backtester import (
     CandleArrays,
     Trade,
     find_exit,
+    find_exit_ticks,
     _build_result,
 )
 
@@ -171,12 +172,15 @@ class ConfluenceEngine:
         symbol: str = "USDJPY",
         lookback: int = 5,
         threshold: int = 2,
-        initial_balance: float = 10_000.0,
+        initial_balance: float = 1_000.0,
         lot_size: float = 0.01,
         pip_value: float = 0.01,
         max_lookback: int = 100,
         show_buffer: bool = False,
         use_sr: bool = False,
+        ticks: pd.DataFrame | None = None,
+        spread_pips: float = 0.5,
+        min_rr: float = 1.0,
     ) -> None:
         self._store = data_store
         self._symbol = symbol
@@ -188,6 +192,9 @@ class ConfluenceEngine:
         self._max_lookback = max_lookback
         self._show_buffer = show_buffer
         self._use_sr = use_sr
+        self._ticks = ticks  # raw tick DataFrame for tick-level backtest
+        self._spread_pips = spread_pips  # round-trip spread cost in pips
+        self._min_rr = min_rr  # minimum risk:reward ratio to take a trade
 
         # Load strategies
         _populate_registry()
@@ -375,6 +382,11 @@ class ConfluenceEngine:
         print(f"  Done in {time.perf_counter() - t0:.1f}s "
               f"({strategies_fast}/{len(self._strategies)} fast path)")
 
+        # Progress + equity stats (accessible by server after run())
+        self._progress = {"pct": 0, "candle": 0, "total": self._arrays.n,
+                          "trades": 0, "confluences": 0, "elapsed": 0}
+        self._equity_stats = {}
+
         # Signal buffer
         buffer = SignalBuffer(
             lookback=self._lookback,
@@ -389,11 +401,15 @@ class ConfluenceEngine:
         peak_balance = self._initial_balance
         max_dd = 0.0
         last_entry_price: Optional[float] = None
+        bankrupt = False
 
         _dedup_tol = 1e-6
         n_signals_total = 0
         n_confluences = 0
         confluence_log: list[dict] = []
+
+        # Dollar value per pip: pip_value * lot_size * 100_000
+        _dollar_per_pip = self._pip_value * self._lot_size * 100_000
 
         t_start = time.perf_counter()
 
@@ -403,6 +419,13 @@ class ConfluenceEngine:
                 realized_pnl_pips += open_trade.pnl_pips
                 trades.append(open_trade)
                 open_trade = None
+
+                # --- Bankruptcy check ---
+                balance = self._initial_balance + realized_pnl_pips * _dollar_per_pip
+                if balance <= 0:
+                    bankrupt = True
+                    print(f"\n  ⚠ BANKRUPT at candle {i} — balance ${balance:.2f}")
+                    break
 
             # 2. Skip if trade is open
             if open_trade is not None:
@@ -465,7 +488,24 @@ class ConfluenceEngine:
                 trigger = agreeing_signals[-1]
                 trade_tp = trigger.take_profit
                 trade_sl = trigger.stop_loss
-                trade_entry = float(self._arrays.closes[i])
+                cur_ts = pd.Timestamp(self._arrays.timestamps[i])
+
+                # --- Tick-level entry price ---
+                use_ticks = self._ticks is not None and not self._ticks.empty
+                if use_ticks:
+                    # First tick at/after signal candle → midprice as entry
+                    candle_start = cur_ts
+                    tick_slice = self._ticks.loc[candle_start:]
+                    if not tick_slice.empty:
+                        first_tick = tick_slice.iloc[0]
+                        trade_entry = (first_tick["bid"] + first_tick["ask"]) / 2.0
+                        entry_tick_ts = tick_slice.index[0]
+                    else:
+                        trade_entry = float(self._arrays.closes[i])
+                        entry_tick_ts = candle_start
+                        use_ticks = False
+                else:
+                    trade_entry = float(self._arrays.closes[i])
 
                 # Dedup
                 if (last_entry_price is not None and
@@ -481,17 +521,32 @@ class ConfluenceEngine:
                 if risk <= 0:
                     continue
 
-                exit_idx, reason, exit_price, mae, mfe = find_exit(
-                    self._arrays, i, conf_direction,
-                    trade_tp, trade_sl, self._pip_value,
-                )
-                cur_ts = pd.Timestamp(self._arrays.timestamps[i])
+                # --- Minimum R:R filter ---
+                rr_ratio = reward / risk if risk > 0 else 0.0
+                if rr_ratio < self._min_rr:
+                    continue
+
+                # --- Tick-level or M1-level exit ---
+                if use_ticks:
+                    exit_idx, reason, exit_price, mae, mfe = find_exit_ticks(
+                        self._ticks, entry_tick_ts, conf_direction,
+                        trade_tp, trade_sl, self._pip_value,
+                        self._arrays.timestamps,
+                    )
+                else:
+                    exit_idx, reason, exit_price, mae, mfe = find_exit(
+                        self._arrays, i, conf_direction,
+                        trade_tp, trade_sl, self._pip_value,
+                    )
                 exit_ts = pd.Timestamp(self._arrays.timestamps[exit_idx])
 
                 if conf_direction == "LONG":
                     pnl = (exit_price - trade_entry) / self._pip_value
                 else:
                     pnl = (trade_entry - exit_price) / self._pip_value
+
+                # --- Spread cost (round-trip) ---
+                pnl -= self._spread_pips
 
                 # Calculate ages of agreeing signals
                 ages = {s.strategy_name: i - s.candle_idx for s in agreeing_signals}
@@ -570,6 +625,15 @@ class ConfluenceEngine:
                     f"confluences={n_confluences} | "
                     f"buffer={n_active} | {elapsed:.1f}s"
                 )
+                # Store progress for frontend polling
+                self._progress = {
+                    "pct": round(pct, 1),
+                    "candle": i,
+                    "total": self._arrays.n,
+                    "trades": len(trades) + (1 if open_trade else 0),
+                    "confluences": n_confluences,
+                    "elapsed": round(elapsed, 1),
+                }
 
         # Close open trade
         if open_trade is not None:
@@ -577,10 +641,29 @@ class ConfluenceEngine:
             trades.append(open_trade)
 
         elapsed = time.perf_counter() - t_start
+        final_balance = self._initial_balance + realized_pnl_pips * _dollar_per_pip
+
+        # Store equity stats for server/UI access
+        self._equity_stats = {
+            "initial_balance": self._initial_balance,
+            "final_balance": round(final_balance, 2),
+            "total_pnl_dollars": round(final_balance - self._initial_balance, 2),
+            "total_pnl_pips": round(realized_pnl_pips, 1),
+            "peak_balance": round(peak_balance, 2),
+            "max_drawdown_pct": round(max_dd, 2),
+            "bankrupt": bankrupt,
+            "trades": len(trades),
+            "elapsed_sec": round(elapsed, 1),
+            "dollar_per_pip": round(_dollar_per_pip, 4),
+        }
+
         print(f"\n  Done in {elapsed:.1f}s")
         print(f"  Total signals evaluated: {n_signals_total}")
         print(f"  Confluences triggered:   {n_confluences}")
         print(f"  Trades executed:         {len(trades)}")
+        print(f"  Balance: ${self._initial_balance:.0f} → ${final_balance:.2f} ({realized_pnl_pips:+.1f}p)")
+        if bankrupt:
+            print(f"  ⚠ BANKRUPT — stopped trading early")
 
         # Print confluence log
         if confluence_log:
@@ -828,7 +911,15 @@ def main():
             Path(__file__).parent.parent / "data" / "DAT_ASCII_USDJPY_M1_202605.csv"
         )
     print(f"\nLoading {csv_path}...")
-    m1_df = HistDataAdapter().load(str(csv_path))
+
+    # Auto-detect: tick data (bid/ask columns) vs candle data (OHLC columns)
+    with open(csv_path, "r") as f:
+        header = f.readline().strip().lower()
+    if "bid" in header and "ask" in header:
+        print("  Detected tick data format (bid/ask) — building M1 candles from ticks")
+        m1_df = TickDataAdapter().load(str(csv_path))
+    else:
+        m1_df = HistDataAdapter().load(str(csv_path))
     print(f"Loaded {len(m1_df):,} M1 candles  "
           f"{m1_df.index[0]} → {m1_df.index[-1]}")
 

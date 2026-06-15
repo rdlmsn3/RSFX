@@ -1,0 +1,26 @@
+{
+  "name": "engulf_h1_rsi",
+  "strategies": [
+    "h1_trend_m5_rsi",
+    "engulfing_ema",
+    "rsi_divergence"
+  ],
+  "use_sr": false,
+  "lookback": 5,
+  "threshold": 2,
+  "csv_file": "DAT_ASCII_USDJPY_M1_202605.csv",
+  "symbol": "USDJPY",
+  "description": "",
+  "created": "",
+  "backtest_result": {
+    "total_trades": 336,
+    "winning_trades": 207,
+    "losing_trades": 129,
+    "win_rate": 61.6,
+    "total_pnl_pips": 350.1,
+    "avg_pnl_pips": 1,
+    "expectancy_pips": 1,
+    "profit_factor": 2.1,
+    "n_candles": 29658
+  }
+}

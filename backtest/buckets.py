@@ -32,6 +32,8 @@ class StrategyBucket:
     use_sr: bool = False
     lookback: int = 5
     threshold: int = 2
+    csv_file: str = "DAT_ASCII_USDJPY_M1_202605.csv"
+    symbol: str = "USDJPY"
     description: str = ""
     created: str = ""
     backtest_result: dict = field(default_factory=dict)
@@ -91,7 +93,10 @@ class StrategyBucket:
                     "strategy_count": len(data.get("strategies", [])),
                     "use_sr": data.get("use_sr", False),
                     "threshold": data.get("threshold", 2),
+                    "csv_file": data.get("csv_file", "DAT_ASCII_USDJPY_M1_202605.csv"),
+                    "symbol": data.get("symbol", "USDJPY"),
                     "has_results": bool(data.get("backtest_result")),
+                    "backtest_result": data.get("backtest_result", {}),
                 })
             except (json.JSONDecodeError, KeyError):
                 continue
@@ -106,6 +111,8 @@ class StrategyBucket:
         use_sr: bool = False,
         lookback: int = 5,
         threshold: int = 2,
+        csv_file: str = "DAT_ASCII_USDJPY_M1_202605.csv",
+        symbol: str = "USDJPY",
         description: str = "",
     ) -> StrategyBucket:
         """Create a bucket from strategy names."""
@@ -116,6 +123,8 @@ class StrategyBucket:
             use_sr=use_sr,
             lookback=lookback,
             threshold=threshold,
+            csv_file=csv_file,
+            symbol=symbol,
             description=description,
             created=time.strftime("%Y-%m-%d"),
         )
@@ -127,6 +136,8 @@ class StrategyBucket:
             "lookback": self.lookback,
             "threshold": self.threshold,
             "use_sr": self.use_sr,
+            "csv_file": self.csv_file,
+            "symbol": self.symbol,
         }
 
     def __str__(self) -> str:

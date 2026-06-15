@@ -1,0 +1,15 @@
+{
+  "name": "cci_h1_tweezer",
+  "strategies": [
+    "tweezer_reversal",
+    "h1_trend_m5_rsi",
+    "cci_ema"
+  ],
+  "use_sr": false,
+  "lookback": 5,
+  "threshold": 2,
+  "csv_file": "DAT_ASCII_USDJPY_M1_202605.csv",
+  "symbol": "USDJPY",
+  "description": "",
+  "created": ""
+}

@@ -22,7 +22,7 @@ from typing import Optional
 import pandas as pd
 
 from core.event_bus import EventBus
-from core.events import MarketTickEvent, TradeEvent
+from core.events import MarketTickEvent, PatternDetectedEvent, TradeEvent
 
 logger = logging.getLogger(__name__)
 
@@ -62,16 +62,19 @@ class TradeEngine:
         Active trading symbol.
     """
 
-    def __init__(self, event_bus: EventBus, symbol: str = "EURUSD") -> None:
+    def __init__(self, event_bus: EventBus, symbol: str = "EURUSD", data_store=None) -> None:
         self._bus = event_bus
         self._symbol = symbol
+        self._store = data_store
 
         self._open_positions: dict[str, Position] = {}
         self._closed_positions: list[Position] = []
         self._trade_history: list[dict] = []        # flat record for analytics
 
-        # Subscribe to tick events for future position management
+        # Subscribe to tick events for position management
         self._bus.subscribe(MarketTickEvent, self._on_market_tick)
+        # Subscribe to pattern events for order generation
+        self._bus.subscribe(PatternDetectedEvent, self._on_pattern_detected)
 
         logger.info("TradeEngine initialised for %s.", symbol)
 
@@ -259,17 +262,82 @@ class TradeEngine:
     # Event handlers
     # ------------------------------------------------------------------
 
+    def _on_pattern_detected(self, event: PatternDetectedEvent) -> None:
+        """
+        Open a position when a confluence signal fires.
+        Only trades signals marked as confluence (metadata["confluence"] == True).
+        """
+        meta = event.metadata
+
+        # Only trade confluence signals
+        if not meta.get("confluence", False):
+            return
+
+        direction = meta.get("direction", "")
+        if direction not in ("LONG", "SHORT"):
+            return
+
+        entry_price = meta.get("entry_price")
+        if entry_price is None:
+            # Fallback: use event price if available
+            return
+
+        # Map signal direction to position direction
+        pos_direction = "BUY" if direction == "LONG" else "SELL"
+
+        self.open_position(
+            direction=pos_direction,
+            price=entry_price,
+            timestamp=event.timestamp,
+            stop_loss=meta.get("stop_loss"),
+            take_profit=meta.get("take_profit"),
+            metadata={
+                "strategy": meta.get("strategy", ""),
+                "confluence_count": meta.get("confluence_count", 0),
+                "signal_name": event.pattern_name,
+            },
+        )
+
     def _on_market_tick(self, event: MarketTickEvent) -> None:
         """
-        Receives every MarketTickEvent.
-
-        Future implementation
-        ---------------------
-        - Mark open positions to market
-        - Evaluate SL/TP breach conditions
-        - Trigger automated closes
-        - Accumulate running P&L
-        - Feed data to RiskManager
+        Check open positions for SL/TP breach on each tick.
+        Closes positions that hit stop loss or take profit.
         """
-        # Placeholder: no position management during tick yet
-        pass
+        if not self._open_positions or self._store is None:
+            return
+
+        # Get current close price from the data store
+        try:
+            m1_df = self._store.get_window(
+                symbol=self._symbol,
+                timeframe="M1",
+                current_timestamp=event.timestamp,
+                lookback=1,
+            )
+            if m1_df.empty:
+                return
+            current_price = float(m1_df["close"].iloc[-1])
+        except Exception:
+            return
+
+        to_close: list[tuple[str, float, str]] = []
+
+        for pos_id, pos in self._open_positions.items():
+            if pos.direction == "BUY":
+                if pos.stop_loss is not None and current_price <= pos.stop_loss:
+                    to_close.append((pos_id, pos.stop_loss, "SL"))
+                elif pos.take_profit is not None and current_price >= pos.take_profit:
+                    to_close.append((pos_id, pos.take_profit, "TP"))
+            else:  # SELL
+                if pos.stop_loss is not None and current_price >= pos.stop_loss:
+                    to_close.append((pos_id, pos.stop_loss, "SL"))
+                elif pos.take_profit is not None and current_price <= pos.take_profit:
+                    to_close.append((pos_id, pos.take_profit, "TP"))
+
+        for pos_id, exit_price, reason in to_close:
+            self.close_position(
+                position_id=pos_id,
+                exit_price=exit_price,
+                exit_time=event.timestamp,
+                metadata={"exit_reason": reason},
+            )

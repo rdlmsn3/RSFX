@@ -17,3 +17,4 @@ __pycache__/
 
 # Data (large CSVs — keep out of git)
 data/DAT_*.csv
+data/merged_output*.csv

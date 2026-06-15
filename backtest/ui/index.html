@@ -45,6 +45,15 @@
   .saved-hint .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
     background: var(--green); margin-right: 4px; vertical-align: middle; }
 
+  /* Progress bar */
+  .progress-wrap { display: none; margin-top: 12px; }
+  .progress-wrap.active { display: block; }
+  .progress-bar-bg { width: 100%; height: 8px; background: var(--bg); border-radius: 4px;
+    overflow: hidden; border: 1px solid var(--border); }
+  .progress-bar-fill { height: 100%; background: var(--accent); border-radius: 4px;
+    transition: width 0.3s ease; width: 0%; }
+  .progress-text { font-size: 12px; color: var(--dim); margin-top: 4px; }
+
   /* Strategy Selector */
   .strat-selector { position: relative; }
   .strat-search { width: 100%; background: var(--bg); border: 1px solid var(--border);
@@ -81,6 +90,30 @@
     margin-top: 8px; font-size: 12px; color: var(--dim); }
   .file-info .icon { font-size: 16px; }
   .file-info .detail { color: var(--text); }
+
+  /* S/R Toggle */
+  .toggle-row { display: flex; align-items: center; gap: 8px; cursor: pointer;
+    padding: 8px 12px; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; height: 38px; margin-top: 0; }
+  .toggle-row input[type="checkbox"] {
+    width: 36px; height: 20px; -webkit-appearance: none; appearance: none;
+    background: var(--border); border-radius: 10px; position: relative;
+    cursor: pointer; transition: background 0.2s; flex-shrink: 0; }
+  .toggle-row input[type="checkbox"]::after {
+    content: ''; position: absolute; left: 2px; top: 2px; width: 16px; height: 16px;
+    background: var(--dim); border-radius: 50%; transition: all 0.2s; }
+  .toggle-row input[type="checkbox"]:checked { background: var(--accent); }
+  .toggle-row input[type="checkbox"]:checked::after {
+    left: 18px; background: #fff; }
+  .toggle-label { font-size: 13px; color: var(--dim); font-weight: 500; }
+
+  /* Bucket Manager */
+  .bucket-row { display: flex; gap: 16px; }
+  .bucket-load { flex: 1; }
+  .bucket-save { flex: 1.5; }
+  .bucket-status { font-size: 12px; margin-top: 4px; min-height: 18px; }
+  .bucket-status .ok { color: var(--green); }
+  .bucket-status .err { color: var(--red); }
 
   /* Results */
   .results { display: none; }
@@ -160,13 +193,53 @@
     </div>
     <div>
       <label>Threshold (min agreements)</label>
-      <input type="number" id="threshold" value="2" min="2" max="10">
+      <input type="number" id="threshold" value="2" min="1" max="10">
+    </div>
+    <div>
+      <label>&nbsp;</label>
+      <label class="toggle-row">
+        <input type="checkbox" id="useSr">
+        <span class="toggle-label">S/R Levels</span>
+      </label>
     </div>
   </div>
+  <div class="row" style="margin-top: 8px;">
+    <div>
+      <label>Spread (pips, round-trip)</label>
+      <input type="number" id="spreadPips" value="0.5" min="0" max="5" step="0.1">
+    </div>
+    <div>
+      <label>Min R:R (reward/risk)</label>
+      <input type="number" id="minRr" value="1.0" min="0" max="10" step="0.1">
+    </div>
+    <div></div>
+  </div>
+
+  <!-- Bucket Manager -->
+  <div class="bucket-row" style="margin-top: 12px;">
+    <div class="bucket-load">
+      <label>Load Bucket</label>
+      <select id="bucketSelect" onchange="loadBucket()">
+        <option value="">— Select saved bucket —</option>
+      </select>
+    </div>
+    <div class="bucket-save">
+      <label>Save Current as Bucket</label>
+      <div style="display:flex;gap:6px">
+        <input type="text" id="bucketName" placeholder="My Strategy Bucket" style="flex:1">
+        <button class="btn-sm" onclick="saveBucket()" style="white-space:nowrap">💾 Save</button>
+      </div>
+    </div>
+  </div>
+  <div class="bucket-status" id="bucketStatus"></div>
 
   <button id="runBtn" onclick="runBacktest()">▶ Run Backtest</button>
   <div class="saved-hint" id="savedHint"></div>
   <div id="status" class="status"></div>
+  <div class="progress-wrap" id="progressWrap">
+    <div class="progress-bar-bg"><div class="progress-bar-fill" id="progressFill"></div></div>
+    <div class="progress-text" id="progressText"></div>
+  </div>
 </div>
 
 <div id="results" class="results">
@@ -212,6 +285,9 @@ function saveState() {
     threshold: document.getElementById('threshold').value,
     csvFile: document.getElementById('csvFile').value,
     symbol: document.getElementById('symbol').value,
+    useSr: document.getElementById('useSr').checked,
+    spreadPips: document.getElementById('spreadPips').value,
+    minRr: document.getElementById('minRr').value,
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   showSaved();
@@ -238,26 +314,34 @@ Promise.all([
 ]).then(([stratData, fileData]) => {
   allStrategies = stratData.strategies;
   allFiles = fileData.files;
-  renderFileList();
-  renderList();
 
   // Restore saved state or defaults
   const saved = loadState();
   if (saved) {
+    // Populate file dropdown first so saved.csvFile can be set
+    renderFileList();
     if (saved.csvFile) document.getElementById('csvFile').value = saved.csvFile;
     if (saved.symbol) document.getElementById('symbol').value = saved.symbol;
     if (saved.lookback) document.getElementById('lookback').value = saved.lookback;
     if (saved.threshold) document.getElementById('threshold').value = saved.threshold;
+    if (saved.useSr !== undefined) document.getElementById('useSr').checked = saved.useSr;
+    if (saved.spreadPips) document.getElementById('spreadPips').value = saved.spreadPips;
+    if (saved.minRr) document.getElementById('minRr').value = saved.minRr;
     if (saved.strategies && saved.strategies.length) {
       selected = new Set(saved.strategies);
     } else {
       selectPreset('top3');
     }
-    onFileChange();
+    onFileChange();  // update file detail + save restored state
     renderList();
   } else {
+    renderFileList();
+    renderList();
     selectPreset('top3');
   }
+
+  // Load bucket list
+  loadBucketList();
 });
 
 // ── File selector ────────────────────────────────────────────────
@@ -283,9 +367,10 @@ function onFileChange() {
 document.getElementById('stratSearch').addEventListener('input', renderList);
 
 // Save on any input change
-['lookback', 'threshold', 'symbol'].forEach(id => {
+['lookback', 'threshold', 'symbol', 'spreadPips', 'minRr'].forEach(id => {
   document.getElementById(id).addEventListener('change', saveState);
 });
+document.getElementById('useSr').addEventListener('change', saveState);
 
 function renderList() {
   const q = document.getElementById('stratSearch').value.toLowerCase();
@@ -361,9 +446,9 @@ async function runBacktest() {
   const status = document.getElementById('status');
   const strats = [...selected];
 
-  if (strats.length < 2) {
+  if (strats.length < 1) {
     status.className = 'status active';
-    status.textContent = '⚠ Select at least 2 strategies';
+    status.textContent = '⚠ Select at least 1 strategy';
     return;
   }
 
@@ -371,6 +456,9 @@ async function runBacktest() {
   const threshold = parseInt(document.getElementById('threshold').value);
   const csvFile = document.getElementById('csvFile').value;
   const symbol = document.getElementById('symbol').value.trim() || 'USDJPY';
+  const useSr = document.getElementById('useSr').checked;
+  const spreadPips = parseFloat(document.getElementById('spreadPips').value) || 0.5;
+  const minRr = parseFloat(document.getElementById('minRr').value) || 1.0;
 
   if (threshold > strats.length) {
     status.className = 'status active';
@@ -381,13 +469,37 @@ async function runBacktest() {
   btn.disabled = true;
   btn.textContent = '⏳ Running...';
   status.className = 'status active';
-  status.innerHTML = `<span class="spinner"></span>Running ${strats.length} strategies on ${csvFile} (lb=${lookback}, t=${threshold})... ~40s`;
+  status.innerHTML = `<span class="spinner"></span>Running ${strats.length} strategies on ${csvFile} (lb=${lookback}, t=${threshold}, spread=${spreadPips}p, minRR=${minRr}${useSr ? ', +S/R' : ''})...`;
+
+  // Show progress bar
+  const progressWrap = document.getElementById('progressWrap');
+  const progressFill = document.getElementById('progressFill');
+  const progressText = document.getElementById('progressText');
+  progressWrap.classList.add('active');
+  progressFill.style.width = '0%';
+  progressText.textContent = 'Starting...';
+
+  // Poll progress every 1s
+  let progressTimer = setInterval(async () => {
+    try {
+      const p = await fetch(`${API}/progress`).then(r => r.json());
+      if (p.running) {
+        progressFill.style.width = `${p.pct}%`;
+        progressText.textContent =
+          `${p.pct}% — candle ${p.candle?.toLocaleString()}/${p.total?.toLocaleString()} | ` +
+          `trades=${p.trades} | confluences=${p.confluences} | ${p.elapsed}s`;
+      } else {
+        progressFill.style.width = '100%';
+        progressText.textContent = 'Finalizing...';
+      }
+    } catch {}
+  }, 1000);
 
   try {
     const resp = await fetch(`${API}/run`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ strategies: strats, lookback, threshold, csv_file: csvFile, symbol })
+      body: JSON.stringify({ strategies: strats, lookback, threshold, csv_file: csvFile, symbol, use_sr: useSr, spread_pips: spreadPips, min_rr: minRr })
     });
     const data = await resp.json();
     if (data.error) {
@@ -395,11 +507,16 @@ async function runBacktest() {
       return;
     }
     const r = data.result;
-    status.innerHTML = `✅ Done in ${data.elapsed}s — ${r.total_trades} trades, ${r.n_candles?.toLocaleString()} candles, ${r.total_pnl_pips > 0 ? '+' : ''}${r.total_pnl_pips} pips`;
+    const balStr = r.initial_balance ? ` | $${r.initial_balance}→$${r.final_balance}` : '';
+    const ddStr = r.max_drawdown_pct ? ` | DD ${r.max_drawdown_pct}%` : '';
+    const bankStr = r.bankrupt ? ' ⚠ BANKRUPT' : '';
+    status.innerHTML = `✅ Done in ${data.elapsed}s — ${r.total_trades} trades, ${r.n_candles?.toLocaleString()} candles, ${r.total_pnl_pips > 0 ? '+' : ''}${r.total_pnl_pips} pips${balStr}${ddStr}${bankStr}`;
     renderResults(data);
   } catch (e) {
     status.textContent = `❌ ${e.message}`;
   } finally {
+    clearInterval(progressTimer);
+    progressWrap.classList.remove('active');
     btn.disabled = false;
     btn.textContent = '▶ Run Backtest';
   }
@@ -416,6 +533,21 @@ function renderResults(data) {
     <div class="stat"><div class="val ${pnlClass}">${r.total_pnl_pips > 0 ? '+' : ''}${r.total_pnl_pips.toFixed(1)}</div><div class="lbl">PnL (pips)</div></div>
     <div class="stat"><div class="val">${r.win_rate.toFixed(1)}%</div><div class="lbl">Win Rate</div></div>
     <div class="stat"><div class="val">${r.profit_factor.toFixed(2)}</div><div class="lbl">Profit Factor</div></div>
+    <div class="stat"><div class="val" style="color:var(--green)">${r.avg_win_pips > 0 ? '+' : ''}${r.avg_win_pips.toFixed(2)}</div><div class="lbl">Avg Win</div></div>
+    <div class="stat"><div class="val" style="color:var(--red)">${r.avg_loss_pips.toFixed(2)}</div><div class="lbl">Avg Loss</div></div>
+    <div class="stat"><div class="val" style="color:var(--green)">${r.median_win_pips > 0 ? '+' : ''}${r.median_win_pips.toFixed(2)}</div><div class="lbl">Median Win</div></div>
+    <div class="stat"><div class="val" style="color:var(--red)">${r.median_loss_pips.toFixed(2)}</div><div class="lbl">Median Loss</div></div>
+    <div class="stat"><div class="val">${r.avg_bars_held}</div><div class="lbl">Avg Bars Held</div></div>
+    <div class="stat"><div class="val">${r.spread_pips}</div><div class="lbl">Spread (pips)</div></div>
+    <div class="stat"><div class="val">${r.min_rr}:1</div><div class="lbl">Min R:R</div></div>
+    <div class="stat"><div class="val">${r.expectancy_pips.toFixed(1)}</div><div class="lbl">Expectancy</div></div>
+    ${r.initial_balance ? `
+    <div class="stat"><div class="val">$${r.initial_balance.toLocaleString()}</div><div class="lbl">Start Balance</div></div>
+    <div class="stat"><div class="val" style="color:${r.final_balance >= r.initial_balance ? 'var(--green)' : 'var(--red)'}">$${r.final_balance.toLocaleString()}</div><div class="lbl">Final Balance</div></div>
+    <div class="stat"><div class="val" style="color:${r.total_pnl_dollars >= 0 ? 'var(--green)' : 'var(--red)'}">${r.total_pnl_dollars >= 0 ? '+' : ''}$${r.total_pnl_dollars.toLocaleString()}</div><div class="lbl">PnL ($)</div></div>
+    <div class="stat"><div class="val">${r.max_drawdown_pct}%</div><div class="lbl">Max Drawdown</div></div>
+    <div class="stat"><div class="val">${r.bankrupt ? '⚠ YES' : '✅ No'}</div><div class="lbl">Bankrupt</div></div>
+    ` : ''}
   `;
 
   const tbody = document.querySelector('#tradesTable tbody');
@@ -458,6 +590,109 @@ function renderResults(data) {
     </div>`;
   }).join('');
 }
+// ── Bucket management ─────────────────────────────────────────────
+let allBuckets = [];
+
+async function loadBucketList() {
+  try {
+    const resp = await fetch(`${API}/buckets`);
+    const data = await resp.json();
+    allBuckets = data.buckets || [];
+    const sel = document.getElementById('bucketSelect');
+    sel.innerHTML = '<option value="">— Select saved bucket —</option>' +
+      allBuckets.map(b => {
+        const sr = b.use_sr ? ' +S/R' : '';
+        const wr = b.backtest_result?.win_rate ? ` (${b.backtest_result.win_rate}% WR)` : '';
+        const pnl = b.backtest_result?.total_pnl_pips ? `, ${b.backtest_result.total_pnl_pips > 0 ? '+' : ''}${b.backtest_result.total_pnl_pips}p` : '';
+        return `<option value="${b.name}">${b.name}${sr} — ${b.strategy_count} strategies${wr}${pnl}</option>`;
+      }).join('');
+  } catch (e) {
+    console.error('Failed to load buckets:', e);
+  }
+}
+
+async function loadBucket() {
+  const name = document.getElementById('bucketSelect').value;
+  if (!name) return;
+
+  try {
+    const resp = await fetch(`${API}/load-bucket/${encodeURIComponent(name)}`);
+    const data = await resp.json();
+    if (data.error) {
+      showBucketStatus(data.error, true);
+      return;
+    }
+    const b = data.bucket;
+    selected = new Set(b.strategies);
+    document.getElementById('lookback').value = b.lookback;
+    document.getElementById('threshold').value = b.threshold;
+    document.getElementById('csvFile').value = b.csv_file;
+    document.getElementById('symbol').value = b.symbol;
+    document.getElementById('useSr').checked = b.use_sr;
+    renderList();
+    onFileChange();
+    saveState();
+    showBucketStatus(`✓ Loaded "${name}"`, false);
+  } catch (e) {
+    showBucketStatus(`Failed: ${e.message}`, true);
+  }
+}
+
+async function saveBucket() {
+  const name = document.getElementById('bucketName').value.trim();
+  if (!name) {
+    showBucketStatus('Enter a bucket name', true);
+    return;
+  }
+  const strats = [...selected];
+  if (strats.length < 1) {
+    showBucketStatus('Select at least 1 strategy', true);
+    return;
+  }
+
+  const payload = {
+    name,
+    strategies: strats,
+    lookback: parseInt(document.getElementById('lookback').value),
+    threshold: parseInt(document.getElementById('threshold').value),
+    csv_file: document.getElementById('csvFile').value,
+    symbol: document.getElementById('symbol').value.trim() || 'USDJPY',
+    use_sr: document.getElementById('useSr').checked,
+    backtest_result: window._lastResult || null,
+  };
+
+  try {
+    const resp = await fetch(`${API}/save-bucket`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      showBucketStatus(`✓ Saved "${name}" to ${data.path}`, false);
+      document.getElementById('bucketName').value = '';
+      loadBucketList();
+    } else {
+      showBucketStatus(`Error: ${data.error}`, true);
+    }
+  } catch (e) {
+    showBucketStatus(`Failed: ${e.message}`, true);
+  }
+}
+
+function showBucketStatus(msg, isError) {
+  const el = document.getElementById('bucketStatus');
+  el.className = 'bucket-status ' + (isError ? 'err' : 'ok');
+  el.textContent = msg;
+  if (!isError) setTimeout(() => { el.textContent = ''; el.className = 'bucket-status'; }, 3000);
+}
+
+// Store last result for bucket saving
+const origRenderResults = window.renderResults;
+window.renderResults = function(data) {
+  window._lastResult = data.result;
+  origRenderResults(data);
+};
 </script>
 </body>
 </html>

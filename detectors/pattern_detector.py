@@ -38,11 +38,13 @@ class PatternDetector:
         lookback: int = 200,
         strategy: Optional[BaseStrategy] = None,
         strategies: Optional[list[BaseStrategy]] = None,
+        confluence_threshold: int = 2,
     ) -> None:
         self._bus = event_bus
         self._store = data_store
         self._symbol = symbol
         self._lookback = lookback
+        self._confluence_threshold = confluence_threshold
 
         # Multi-strategy support
         if strategies:
@@ -92,6 +94,15 @@ class PatternDetector:
     @property
     def is_confluence_mode(self) -> bool:
         return len(self._strategies) > 1
+
+    @property
+    def confluence_threshold(self) -> int:
+        return self._confluence_threshold
+
+    @confluence_threshold.setter
+    def confluence_threshold(self, value: int) -> None:
+        self._confluence_threshold = max(1, value)
+        logger.info("Confluence threshold set to %d", self._confluence_threshold)
 
     @property
     def signals(self) -> list[PatternSignal]:
@@ -173,7 +184,7 @@ class PatternDetector:
         for sig in signals:
             d = sig.metadata.get("direction", "")
             count = direction_counts.get(d, 0)
-            sig.metadata["confluence"] = count >= 2
+            sig.metadata["confluence"] = count >= self._confluence_threshold
             sig.metadata["confluence_count"] = count
 
         return signals

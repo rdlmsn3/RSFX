@@ -55,7 +55,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.data_loader import HistDataAdapter
+from core.data_loader import HistDataAdapter, TickDataAdapter
 from core.market_data_store import MarketDataStore
 from detectors.strategies.registry import STRATEGY_REGISTRY, _populate_registry
 from detectors.strategies.base import BaseStrategy
@@ -208,6 +208,106 @@ def find_exit(
         mae = float(mae_raw[:bars_open].min()) / pip_value   # negative
     else:
         mfe = mae = 0.0
+
+    return exit_idx, reason, exit_price, mae, mfe
+
+
+# =========================================================================
+# Tick-level TP/SL scanner
+# =========================================================================
+
+def find_exit_ticks(
+    ticks: pd.DataFrame,
+    entry_timestamp: pd.Timestamp,
+    direction: str,
+    tp: float,
+    sl: float,
+    pip_value: float,
+    m1_timestamps: np.ndarray,
+) -> tuple[int, str, float, float, float]:
+    """
+    Tick-level TP/SL scanner — vectorised over raw ticks.
+
+    Parameters
+    ----------
+    ticks : DataFrame
+        Raw ticks with DatetimeIndex, columns [bid, ask, volume].
+    entry_timestamp : Timestamp
+        When the trade was entered.
+    direction : str
+        "LONG" or "SHORT".
+    tp, sl : float
+        Take-profit and stop-loss prices.
+    pip_value : float
+        Size of one pip (0.01 for JPY).
+    m1_timestamps : np.ndarray
+        M1 candle timestamps (sorted ASC) — used to convert exit tick
+        time back to a candle index for the main loop.
+
+    Returns
+    -------
+    (exit_idx, reason, exit_price, mae_pips, mfe_pips)
+        Same signature as find_exit() for drop-in compatibility.
+    """
+    if ticks is None or ticks.empty:
+        return len(m1_timestamps) - 1, "EOD", float(m1_timestamps[-1]), 0.0, 0.0
+
+    # Slice ticks from entry forward
+    future = ticks.loc[entry_timestamp:]
+    if future.empty:
+        return len(m1_timestamps) - 1, "EOD", 0.0, 0.0, 0.0
+
+    bid = future["bid"].values
+    ask = future["ask"].values
+    n = len(bid)
+
+    if direction == "LONG":
+        # TP: bid reaches tp → fill at bid
+        tp_hits = np.nonzero(bid >= tp)[0]
+        # SL: bid drops to sl → fill at bid
+        sl_hits = np.nonzero(bid <= sl)[0]
+        # MAE/MFE relative to entry midprice
+        entry_mid = (bid[0] + ask[0]) / 2.0
+        mfe_raw = bid - entry_mid   # favorable = bid rises
+        mae_raw = bid - entry_mid   # adverse = bid drops (negative)
+    else:
+        # TP: ask drops to tp → fill at ask
+        tp_hits = np.nonzero(ask <= tp)[0]
+        # SL: ask rises to sl → fill at ask
+        sl_hits = np.nonzero(ask >= sl)[0]
+        entry_mid = (bid[0] + ask[0]) / 2.0
+        mfe_raw = entry_mid - ask   # favorable = ask drops
+        mae_raw = entry_mid - ask   # adverse = ask rises (negative)
+
+    tp_tick = int(tp_hits[0]) if len(tp_hits) else n
+    sl_tick = int(sl_hits[0]) if len(sl_hits) else n
+
+    if tp_tick == n and sl_tick == n:
+        # Neither hit — EOD at last tick
+        exit_price = float(bid[-1]) if direction == "LONG" else float(ask[-1])
+        reason = "EOD"
+        exit_tick_idx = n - 1
+    elif tp_tick <= sl_tick:
+        exit_price = float(bid[tp_tick]) if direction == "LONG" else float(ask[tp_tick])
+        reason = "TP"
+        exit_tick_idx = tp_tick
+    else:
+        exit_price = float(bid[sl_tick]) if direction == "LONG" else float(ask[sl_tick])
+        reason = "SL"
+        exit_tick_idx = sl_tick
+
+    # MAE/MFE over the ticks the trade was actually open
+    ticks_open = exit_tick_idx + 1
+    if ticks_open > 0:
+        mfe = float(mfe_raw[:ticks_open].max()) / pip_value
+        mae = float(mae_raw[:ticks_open].min()) / pip_value  # negative
+    else:
+        mfe = mae = 0.0
+
+    # Convert exit tick timestamp → M1 candle index
+    exit_ts = future.index[exit_tick_idx]
+    exit_idx = int(np.searchsorted(m1_timestamps, np.datetime64(exit_ts), side="right")) - 1
+    exit_idx = max(0, min(exit_idx, len(m1_timestamps) - 1))
 
     return exit_idx, reason, exit_price, mae, mfe
 
@@ -865,7 +965,15 @@ def main() -> None:
     else:
         csv_path = Path(__file__).parent.parent / "data" / "DAT_ASCII_USDJPY_M1_202605.csv"
     print(f"\nLoading {csv_path}...")
-    m1_df = HistDataAdapter().load(str(csv_path))
+
+    # Auto-detect: tick data (bid/ask columns) vs candle data (OHLC columns)
+    with open(csv_path, "r") as f:
+        header = f.readline().strip().lower()
+    if "bid" in header and "ask" in header:
+        print("  Detected tick data format (bid/ask) — building M1 candles from ticks")
+        m1_df = TickDataAdapter().load(str(csv_path))
+    else:
+        m1_df = HistDataAdapter().load(str(csv_path))
     print(f"Loaded {len(m1_df):,} M1 candles  {m1_df.index[0]} → {m1_df.index[-1]}")
 
     store = MarketDataStore()

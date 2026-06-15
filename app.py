@@ -205,7 +205,7 @@ def _load_data(csv_path: str, symbol: str) -> bool:
             ctrl    = PlaybackController(bus, store, symbol=symbol)
             strategy = EMAStochasticMTFStrategy()
             det     = PatternDetector(bus, store, symbol=symbol, strategy=strategy)
-            te      = TradeEngine(bus, symbol=symbol)
+            te      = TradeEngine(bus, symbol=symbol, data_store=store)
 
             # Emit the first tick so the chart has data immediately
             ctrl.reset()
@@ -394,20 +394,11 @@ def _render_sidebar() -> None:
                             strategy_instances.append(cls())
 
                     st.session_state.detector.strategies = strategy_instances
+                    st.session_state.detector.confluence_threshold = bucket.threshold
                     st.session_state.active_bucket = bucket.name
                     st.session_state.active_bucket_use_sr = bucket.use_sr
                     st.session_state.active_strategy = None
                     st.rerun()
-
-        # ---- S/R Toggle ---------------------------------------------------
-        st.markdown("#### Support / Resistance")
-        use_sr = st.toggle(
-            "Show S/R Levels on Chart",
-            value=st.session_state.get("show_sr", False),
-        )
-        if use_sr != st.session_state.get("show_sr"):
-            st.session_state.show_sr = use_sr
-            st.rerun()
 
         st.markdown("---")
 
@@ -521,7 +512,7 @@ def _render_status() -> None:
         c1, c2, c3 = st.columns(3)
         c1.metric("Mode", f"Bucket ({n_strats} strategies)")
         c2.metric("Bucket", active_bucket or "Custom")
-        c3.metric("Confluence", f"Any {det.signals[-1].metadata.get('confluence_count', 2) if det.signals else 2}+ agree")
+        c3.metric("Confluence", f"Any {det.confluence_threshold}+ agree")
     else:
         active_strategy = getattr(st.session_state, 'active_strategy', 'ema_stochastic_mtf')
         strategy_info = STRATEGY_REGISTRY.get(active_strategy, {})
@@ -578,51 +569,91 @@ def _render_chart() -> None:
             max_candles=CHART_LOOKBACK,
         )
 
-        # Add S/R levels overlay if enabled
-        if st.session_state.get("show_sr") and tf == "M1":
-            ChartRenderer.add_sr_levels(fig, window, row=1)
-
         st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
 
 
-def _render_signals() -> None:
-    """Render signal history table below the charts."""
-    det: PatternDetector = st.session_state.detector
+def _render_orders() -> None:
+    """Render open and closed trade orders with live PnL."""
+    te: TradeEngine = st.session_state.trade_engine
+    store: MarketDataStore = st.session_state.store
+    sym = st.session_state.symbol
+    ctrl: PlaybackController = st.session_state.controller
 
-    if det.signal_count == 0:
+    all_positions = te.open_positions + te.closed_positions
+    if not all_positions:
         return
 
-    st.markdown("### Signals")
+    st.markdown("### Orders")
 
-    # Build signals DataFrame
-    signals_data = []
-    for s in det.signals:
-        is_confluence = s.metadata.get("confluence", False)
-        conf_count = s.metadata.get("confluence_count", 1)
-        signals_data.append({
-            "Time": str(s.end_time)[:16],
-            "Direction": s.metadata.get("direction", "?"),
-            "Strategy": s.metadata.get("strategy", "?"),
-            "Confluence": f"✓ {conf_count}" if is_confluence else "—",
-            "Confidence": f"{s.confidence:.2f}",
-            "Details": ", ".join(f"{k}={v}" for k, v in s.metadata.items()
-                                if k not in ("strategy", "direction", "confluence", "confluence_count")
-                                and not k.startswith("candle")),
+    # Get current price for live PnL
+    current_price = None
+    try:
+        ts = ctrl.current_timestamp
+        if ts:
+            m1 = store.get_window(sym, "M1", ts, lookback=1)
+            if not m1.empty:
+                current_price = float(m1["close"].iloc[-1])
+    except Exception:
+        pass
+
+    orders_data = []
+    for pos in all_positions:
+        # Live PnL for open positions
+        if pos.status == "OPEN" and current_price is not None:
+            mult = 1 if pos.direction == "BUY" else -1
+            live_pnl = mult * (current_price - pos.entry_price) * 100_000  # pips
+        elif pos.pnl is not None:
+            live_pnl = pos.pnl / (pos.lot_size * 100_000)  # convert to pips
+        else:
+            live_pnl = 0.0
+
+        exit_reason = pos.metadata.get("exit_reason", "—") if pos.status == "CLOSED" else "—"
+        strategy = pos.metadata.get("strategy", "—")
+        conf_count = pos.metadata.get("confluence_count", 0)
+
+        orders_data.append({
+            "Time": str(pos.entry_time)[:16],
+            "Dir": pos.direction,
+            "Entry": f"{pos.entry_price:.5f}",
+            "TP": f"{pos.take_profit:.5f}" if pos.take_profit else "—",
+            "SL": f"{pos.stop_loss:.5f}" if pos.stop_loss else "—",
+            "Status": pos.status,
+            "Live PnL": f"{live_pnl:+.1f}",
+            "Exit": exit_reason,
+            "Strategy": strategy,
+            "Conf": conf_count,
         })
 
-    signals_df = pd.DataFrame(signals_data)
+    orders_df = pd.DataFrame(orders_data)
 
-    # Highlight confluence signals
-    def highlight_confluence(row):
-        if row.get("Confluence", "").startswith("✓"):
-            return ["background-color: #3fb95022"] * len(row)
+    # Color code rows
+    def highlight_orders(row):
+        if row.get("Status") == "OPEN":
+            return ["background-color: #3fb95011"] * len(row)
+        pnl = float(row.get("Live PnL", "0").replace("+", ""))
+        if pnl > 0:
+            return ["background-color: #3fb95015"] * len(row)
+        elif pnl < 0:
+            return ["background-color: #f8514915"] * len(row)
         return [""] * len(row)
 
     st.dataframe(
-        signals_df.style.apply(highlight_confluence, axis=1),
+        orders_df.style.apply(highlight_orders, axis=1),
         use_container_width=True,
-        height=min(300, 35 + len(signals_df) * 35),
+        height=min(400, 35 + len(orders_df) * 35),
     )
+
+    # Summary metrics
+    open_count = len([p for p in all_positions if p.status == "OPEN"])
+    closed_count = len([p for p in all_positions if p.status == "CLOSED"])
+    winning = len([p for p in te.closed_positions if (p.pnl or 0) > 0])
+    total_pnl = sum((p.pnl or 0) for p in te.closed_positions)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Open", open_count)
+    c2.metric("Closed", closed_count)
+    c3.metric("Win Rate", f"{winning/closed_count*100:.0f}%" if closed_count else "—")
+    c4.metric("Total PnL", f"{total_pnl:+.1f}")
 
 
 # ===========================================================================
@@ -651,8 +682,8 @@ def main() -> None:
     # ---- Chart ------------------------------------------------------------
     _render_chart()
 
-    # ---- Signal History ---------------------------------------------------
-    _render_signals()
+    # ---- Order History ----------------------------------------------------
+    _render_orders()
 
     # ---- Playback loop: advance one tick per rerun while playing ----------
     ctrl: PlaybackController = st.session_state.controller

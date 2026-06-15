@@ -45,9 +45,11 @@ python3 -m backtest --help
 ## Architecture
 
 ```
-CSV Data Source
+CSV Data Source (M1 bars or tick data)
       ↓
-DataAdapter (HistDataAdapter / MT5Adapter / …)
+DataAdapter (HistDataAdapter — auto-detects M1 vs tick format)
+      ├── M1 bars → MarketDataStore
+      └── Tick data → TickCandleBuilder → M1 bars + raw ticks → MarketDataStore
       ↓
 MarketDataStore   ← pre-computes M1 → M5, H1, D1 at load time
       ↓
@@ -82,10 +84,11 @@ RSFX/
 ├── backtest/                       # Backtest module (python3 -m backtest)
 │   ├── __init__.py
 │   ├── __main__.py                 # Unified entry point (subcommands)
-│   ├── backtester.py               # Parallel strategy backtester
+│   ├── backtester.py               # Parallel strategy backtester + tick-level exit scanner
 │   ├── correlation.py              # Strategy correlation analysis
 │   ├── portfolio.py                # Portfolio optimizer (brute-force)
-│   ├── confluence.py               # Signal-buffer confluence backtester
+│   ├── confluence.py               # Signal-buffer confluence backtester (equity tracking)
+│   ├── buckets.py                  # Named strategy bucket system
 │   └── ui/
 │       ├── index.html              # Confluence web UI frontend
 │       └── server.py               # FastAPI backend (port 8502)
@@ -98,7 +101,8 @@ RSFX/
 │   └── *_latest.csv                # Symlinks to most recent
 │
 ├── core/
-│   ├── data_loader.py              # Adapter-pattern CSV loaders
+│   ├── data_loader.py              # Adapter-pattern CSV loaders (M1 + tick auto-detect)
+│   ├── tick_candle_builder.py      # Tick → M1 OHLCV aggregation (midprice)
 │   ├── market_data_store.py        # Multi-symbol, multi-timeframe store
 │   ├── playback_controller.py      # Replay cursor and tick publisher
 │   ├── event_bus.py                # Pub/Sub message broker
@@ -116,8 +120,10 @@ RSFX/
 ├── views/
 │   └── chart_renderer.py           # Plotly figure factory
 │
+├── buckets/                        # Saved strategy buckets (JSON)
+│
 └── data/
-    └── *.csv                       # HistData.com format data files
+    └── *.csv                       # HistData.com format data files (M1 + tick)
 ```
 
 ---
@@ -207,6 +213,18 @@ python3 -m backtest confluence -s tweezer_reversal,h1_trend_m5_rsi,cci_ema --loo
 3. If another strategy fires within that window and agrees → confluence trade
 4. TP/SL from the most recent (triggering) signal
 
+**Tick-level execution:**
+- Entry: first tick at/after signal candle → midprice `(bid+ask)/2`
+- Exit: vectorized scan over raw ticks for SL/TP hit
+- LONG exits use bid price, SHORT exits use ask price (proper spread modeling)
+- MAE/MFE calculated from tick-level excursion
+
+**Equity tracking:**
+- Starts with configurable balance (default $1,000)
+- Dollar PnL per trade: `pnl_pips × pip_value × lot_size × 100,000`
+- Bankruptcy stop: halts trading when balance ≤ $0
+- Tracks: peak balance, max drawdown %, final balance
+
 **Output:** `results/confluence_*.csv`
 
 ### 6. Support/Resistance Detection (`detectors/support_resistance.py`)
@@ -233,7 +251,17 @@ python3 -m backtest ui
 # → http://localhost:8502
 ```
 
-**Features:** Searchable strategy picker, quick presets, data file selector, configurable lookback/threshold, results with trade table + participation chart, localStorage persistence.
+**Features:**
+- Searchable strategy picker with quick presets (All, Top 3, H1 Trend, Divergence)
+- Single-strategy or multi-strategy backtesting
+- Data file selector (M1 bars + tick data auto-detected)
+- Configurable: lookback, threshold, spread (pips), min R:R
+- S/R-aware TP/SL toggle
+- Live progress bar during backtest (polls every 1s)
+- Equity tracking: start/final balance, PnL ($), max drawdown %, bankruptcy flag
+- Extended stats: avg/median win/loss, avg duration, expectancy
+- Strategy bucket system (save/load named configurations)
+- localStorage persistence across sessions
 
 ---
 
@@ -307,7 +335,9 @@ Place in `detectors/strategies/` — auto-discovered by the registry.
 - Backtester pre-computes indicators once, runs walk-forward with NumPy arrays only (~0.01s/strategy)
 - Parallel execution across CPU cores via `ProcessPoolExecutor`
 - S/R detection uses ATR-adaptive tolerance — auto-tunes for any pair
-- Tested on 2M+ row DataFrames without noticeable playback lag
+- Tick data auto-converted to M1 via `TickCandleBuilder` (midprice aggregation)
+- Tick-level exit scanner uses vectorized NumPy — ~50x faster than Python loop
+- Tested on 2M+ tick rows and 30K+ M1 candles without noticeable lag
 
 ---
 
@@ -316,6 +346,7 @@ Place in `detectors/strategies/` — auto-discovered by the registry.
 | Component | Status |
 |---|---|
 | Data Loader (HistData) | ✅ |
+| Tick data support (auto-detect + M1 conversion) | ✅ |
 | MarketDataStore (M1/M5/H1/D1) | ✅ |
 | EventBus | ✅ |
 | PlaybackController | ✅ |
@@ -332,6 +363,13 @@ Place in `detectors/strategies/` — auto-discovered by the registry.
 | Confluence web UI | ✅ |
 | Support/Resistance detection (ATR-adaptive) | ✅ |
 | S/R-aware TP/SL toggle | ✅ |
+| Tick-level backtest (bid/ask, MAE/MFE from ticks) | ✅ |
+| Single-strategy backtest support | ✅ |
+| Spread cost modeling (configurable pips) | ✅ |
+| Min R:R filter (skip low-quality trades) | ✅ |
+| Equity tracking + bankruptcy stop | ✅ |
+| Live progress bar (poll-based) | ✅ |
+| Strategy bucket system (save/load) | ✅ |
 | ML model integration | 🔜 |
 | Strategy Engine | 🔜 |
 | Risk Manager | 🔜 |
