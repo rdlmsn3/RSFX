@@ -1,6 +1,6 @@
 # RSFX — Forex Market Replay & Strategy Research Platform
 
-Event-driven market replay with 72+ strategies, backtesting, correlation analysis, portfolio optimization, confluence trading, and a web UI.
+Event-driven market replay with 72+ strategies, backtesting, correlation analysis, portfolio optimization, confluence trading, support/resistance detection, and a web UI.
 
 ---
 
@@ -20,6 +20,9 @@ python3 backtest.py
 # Run backtester (specific strategies)
 python3 backtest.py -s tweezer_reversal,h1_trend_m5_rsi,cci_ema
 
+# Run backtester with S/R-aware TP/SL
+python3 backtest.py -s h1_trend_m5_rsi --use-sr
+
 # Run strategy correlation analysis
 python3 strategy_correlation.py
 
@@ -28,6 +31,9 @@ python3 portfolio_optimizer.py
 
 # Run confluence backtester
 python3 confluence_backtest.py -s tweezer_reversal,h1_trend_m5_rsi,cci_ema --lookback 5
+
+# Run confluence backtester with S/R-aware exits
+python3 confluence_backtest.py -s tweezer_reversal,h1_trend_m5_rsi,cci_ema --lookback 5 --use-sr
 
 # Run confluence web UI
 python3 confluence_ui/server.py
@@ -50,6 +56,7 @@ PlaybackController
 EventBus  (publish / subscribe)
   ├── PatternDetector   → subscribes to MarketTickEvent
   ├── TradeEngine       → subscribes to MarketTickEvent
+  ├── SupportResistance → pivot-based S/R detection (ATR-adaptive)
   └── (future) MLEngine, RiskManager, StrategyEngine, …
 
 app.py (Streamlit View)
@@ -88,6 +95,7 @@ RSFX/
 │
 ├── detectors/
 │   ├── pattern_detector.py         # Pattern detection (pluggable)
+│   ├── support_resistance.py       # Pivot-based S/R with ATR-adaptive tolerance
 │   └── strategies/
 │       ├── base.py                 # BaseStrategy (precompute, evaluate_fast)
 │       ├── registry.py             # Auto-discovery registry (72+ strategies)
@@ -126,6 +134,9 @@ python3 backtest.py -s h1_trend
 
 # Custom data file
 python3 backtest.py --csv data/DAT_ASCII_EURUSD_M1_202605.csv --symbol EURUSD
+
+# With S/R-aware TP/SL (support/resistance levels for exits)
+python3 backtest.py -s h1_trend_m5_rsi --use-sr
 
 # Options
 python3 backtest.py -s tweezer_reversal --workers 4 --top 10 --no-save
@@ -173,6 +184,9 @@ python3 confluence_backtest.py -s tweezer_reversal,h1_trend_m5_rsi,cci_ema --loo
 # 3-of-5 must agree
 python3 confluence_backtest.py -s tweezer_reversal,h1_trend_m5_rsi,cci_ema,ema_ribbon_pullback,marubozu_trend --lookback 5 --threshold 3
 
+# With S/R-aware exits
+python3 confluence_backtest.py -s tweezer_reversal,h1_trend_m5_rsi,cci_ema --lookback 5 --use-sr
+
 # See who voted when
 python3 confluence_backtest.py -s tweezer_reversal,h1_trend_m5_rsi,cci_ema --lookback 5 --show-votes
 ```
@@ -185,7 +199,37 @@ python3 confluence_backtest.py -s tweezer_reversal,h1_trend_m5_rsi,cci_ema --loo
 
 **Output:** Timestamped CSVs with metadata.
 
-### 6. Confluence Web UI (`confluence_ui/`)
+### 6. Support/Resistance Detection (`detectors/support_resistance.py`)
+Pivot-based S/R with ATR-adaptive tolerance — auto-tunes for any pair, no manual parameters needed.
+
+```python
+from detectors.support_resistance import SupportResistance
+
+sr = SupportResistance(df)  # ATR-adaptive tolerance
+levels = sr.find_levels()   # list of SRLevel
+
+# Query nearest levels
+support = sr.nearest_support(150.250)
+resistance = sr.nearest_resistance(150.250)
+
+# Get S/R-aware TP/SL
+tp, sl = sr.get_tp_sl(150.250, "LONG", atr_sl=0.30)
+```
+
+**How it works:**
+1. Find swing highs/lows using rolling window extrema
+2. Cluster nearby pivots within ATR-based tolerance
+3. Score by touch count, recency, proximity, and cleanliness
+4. Returns sorted levels (strongest first)
+
+**ATR-adaptive tolerance:** `tolerance = ATR(14) × 0.3` — automatically scales with pair volatility:
+- EURUSD (ATR ~0.0008) → tolerance ~0.00024 (2.4 pips)
+- USDJPY (ATR ~0.008) → tolerance ~0.0024 (0.24 pips)
+- GBPJPY (ATR ~0.05) → tolerance ~0.015 (1.5 pips)
+
+**Toggle in backtester:** `--use-sr` flag overrides ATR-based TP/SL with S/R-targeted exits.
+
+### 7. Confluence Web UI (`confluence_ui/`)
 Browser-based interface for the confluence backtester.
 
 ```bash
@@ -212,6 +256,16 @@ python3 confluence_ui/server.py
 | h1_trend_m5_rsi | 731 | 62.2% | +860.2 | 2.36 | 0.32% |
 | ema_ribbon_pullback | 2,138 | 54.5% | +1,282.5 | 1.53 | 0.33% |
 | marubozu_trend | 615 | 67.2% | +736.9 | 2.58 | 0.18% |
+
+### S/R-Aware Exits (Toggle Comparison)
+| Strategy | Mode | Trades | Win% | PnL (pips) | PF |
+|---|---|---|---|---|---|
+| h1_trend_m5_rsi | ATR | 731 | 62.2% | +860.2 | 2.36 |
+| h1_trend_m5_rsi | **S/R** | 323 | **64.4%** | +773.2 | **2.68** |
+| tweezer_reversal | ATR | 2,035 | 55.3% | +1,110.8 | 1.57 |
+| tweezer_reversal | S/R | 937 | 57.0% | +322.6 | 1.17 |
+
+S/R toggle helps some strategies (h1_trend_m5_rsi: WR +2.2%, PF +0.32) but not others — depends on market regime. Works best in ranging markets with clear S/R zones.
 
 ### Best Portfolio Combos (3-strategy)
 | Combo | Sharpe | PnL (pips) | Win% | PF |
@@ -268,6 +322,7 @@ Place in `detectors/strategies/` — auto-discovered by the registry. No other f
 - `get_window()` uses `searchsorted()` (O log n) — no full-frame copies during playback
 - Backtester pre-computes indicators once per strategy, runs walk-forward loop with NumPy arrays only (~0.01s/strategy vs ~8s/strategy with pandas rolling)
 - Parallel execution across CPU cores via `ProcessPoolExecutor`
+- S/R detection uses ATR-adaptive tolerance — auto-tunes for any pair without manual parameters
 - Tested on 2M+ row DataFrames without noticeable playback lag
 
 ---
@@ -291,7 +346,8 @@ Place in `detectors/strategies/` — auto-discovered by the registry. No other f
 | Portfolio optimizer (brute-force) | ✅ |
 | Confluence backtester (signal-buffer) | ✅ |
 | Confluence web UI | ✅ |
-| Support/Resistance detection | 🔜 |
+| Support/Resistance detection (ATR-adaptive) | ✅ |
+| S/R-aware TP/SL toggle | ✅ |
 | ML model integration | 🔜 |
 | Strategy Engine | 🔜 |
 | Risk Manager | 🔜 |
