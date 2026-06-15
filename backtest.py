@@ -240,6 +240,7 @@ def _run_strategy_job(job: dict) -> dict:
     initial_balance = job["initial_balance"]
     lot_size      = job["lot_size"]
     lookback      = job["lookback"]
+    use_sr        = job.get("use_sr", False)
 
     # Reconstruct CandleArrays
     ad = job["arrays_dict"]
@@ -395,6 +396,26 @@ def _run_strategy_job(job: dict) -> dict:
                 except Exception:
                     pass
 
+            # S/R override: if use_sr is enabled, try to improve TP/SL
+            if use_sr and tp and sl:
+                try:
+                    from detectors.support_resistance import SupportResistance
+                    win_start = max(0, i - lookback)
+                    _sr_df = pd.DataFrame(
+                        {"open":  arrays.opens[win_start:i+1],
+                         "high":  arrays.highs[win_start:i+1],
+                         "low":   arrays.lows[win_start:i+1],
+                         "close": arrays.closes[win_start:i+1]},
+                    )
+                    sr = SupportResistance(_sr_df, pip_tolerance=0.10, min_touches=2)
+                    atr_sl = abs(entry_price - sl)  # current SL distance as ATR proxy
+                    sr_tp, sr_sl = sr.get_tp_sl(entry_price, direction, atr_sl)
+                    if sr_tp and sr_sl:
+                        tp = sr_tp
+                        sl = sr_sl
+                except Exception:
+                    pass  # fall back to ATR TP/SL
+
             # Deduplicate
             if (last_entry_price is not None and
                     abs(last_entry_price - entry_price) < _dedup_tol):
@@ -531,6 +552,7 @@ class Backtester:
         pip_value: float     = 0.01,
         max_workers: Optional[int] = None,
         lookback: int        = 100,
+        use_sr: bool         = False,
     ) -> None:
         self._store    = data_store
         self._symbol   = symbol
@@ -538,6 +560,7 @@ class Backtester:
         self._lot_size = lot_size
         self._pip_value = pip_value
         self._lookback  = lookback
+        self._use_sr    = use_sr
 
         cpus = os.cpu_count() or 1
         self._max_workers = max_workers if max_workers is not None else max(1, cpus - 1)
@@ -580,6 +603,7 @@ class Backtester:
             "initial_balance": self._initial_balance,
             "lot_size":       self._lot_size,
             "lookback":       self._lookback,
+            "use_sr":         self._use_sr,
         }
 
     def run_all(
@@ -824,6 +848,11 @@ def main() -> None:
         default=5,
         help="Number of top strategies to display (default: 5)",
     )
+    parser.add_argument(
+        "--use-sr",
+        action="store_true",
+        help="Use S/R levels for TP/SL instead of ATR (support/resistance aware exits)",
+    )
     args = parser.parse_args()
 
     print("=" * 80)
@@ -873,14 +902,15 @@ def main() -> None:
     workers = args.workers if args.workers is not None else max(1, cpus - 1)
     print(f"Running on {workers} worker(s) (CPUs: {cpus})\n")
 
-    bt = Backtester(store, symbol=args.symbol, max_workers=workers)
+    bt = Backtester(store, symbol=args.symbol, max_workers=workers, use_sr=args.use_sr)
 
     t0 = time.perf_counter()
     results = bt.run_all(registry, progress=True)
     elapsed = time.perf_counter() - t0
 
+    sr_tag = " [S/R-aware TP/SL]" if args.use_sr else ""
     print(f"\nCompleted {len(registry)} strategies in {elapsed:.1f}s "
-          f"({elapsed/len(registry):.2f}s/strategy)")
+          f"({elapsed/len(registry):.2f}s/strategy){sr_tag}")
 
     results.sort(key=lambda x: x["total_pnl_pips"], reverse=True)
 

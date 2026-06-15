@@ -176,6 +176,7 @@ class ConfluenceEngine:
         pip_value: float = 0.01,
         max_lookback: int = 100,
         show_buffer: bool = False,
+        use_sr: bool = False,
     ) -> None:
         self._store = data_store
         self._symbol = symbol
@@ -186,6 +187,7 @@ class ConfluenceEngine:
         self._pip_value = pip_value
         self._max_lookback = max_lookback
         self._show_buffer = show_buffer
+        self._use_sr = use_sr
 
         # Load strategies
         _populate_registry()
@@ -289,14 +291,15 @@ class ConfluenceEngine:
         signal: PatternSignal,
         i: int,
     ) -> tuple[float, float]:
-        """Get TP/SL from signal, with ATR fallback."""
+        """Get TP/SL from signal, with ATR fallback. S/R override if enabled."""
         tp = signal.metadata.get("take_profit", 0.0)
         sl = signal.metadata.get("stop_loss", 0.0)
+        direction = signal.metadata.get("direction", "")
 
         if tp and sl:
             entry = float(self._arrays.closes[i])
             # Sanity: ensure correct direction
-            if signal.metadata.get("direction") == "LONG":
+            if direction == "LONG":
                 if tp <= entry:
                     tp = entry + abs(tp - entry)
                 if sl >= entry:
@@ -306,6 +309,26 @@ class ConfluenceEngine:
                     tp = entry - abs(tp - entry)
                 if sl <= entry:
                     sl = entry + abs(sl - entry)
+
+            # S/R override if enabled
+            if self._use_sr:
+                try:
+                    from detectors.support_resistance import SupportResistance
+                    win_start = max(0, i - self._max_lookback)
+                    _sr_df = pd.DataFrame(
+                        {"open":  self._arrays.opens[win_start:i+1],
+                         "high":  self._arrays.highs[win_start:i+1],
+                         "low":   self._arrays.lows[win_start:i+1],
+                         "close": self._arrays.closes[win_start:i+1]},
+                    )
+                    sr = SupportResistance(_sr_df, pip_tolerance=0.10, min_touches=2)
+                    atr_sl = abs(entry - sl)
+                    sr_tp, sr_sl = sr.get_tp_sl(entry, direction, atr_sl)
+                    if sr_tp and sr_sl:
+                        tp, sl = sr_tp, sr_sl
+                except Exception:
+                    pass
+
             return tp, sl
 
         # ATR fallback
@@ -319,6 +342,26 @@ class ConfluenceEngine:
             BaseStrategy.compute_tp_sl(signal, _df)
             tp = signal.metadata.get("take_profit", 0.0)
             sl = signal.metadata.get("stop_loss", 0.0)
+
+            # S/R override on ATR fallback too
+            if self._use_sr and tp and sl:
+                try:
+                    from detectors.support_resistance import SupportResistance
+                    _sr_df = pd.DataFrame(
+                        {"open":  self._arrays.opens[win_start:i+1],
+                         "high":  self._arrays.highs[win_start:i+1],
+                         "low":   self._arrays.lows[win_start:i+1],
+                         "close": self._arrays.closes[win_start:i+1]},
+                    )
+                    sr = SupportResistance(_sr_df, pip_tolerance=0.10, min_touches=2)
+                    entry = float(self._arrays.closes[i])
+                    atr_sl = abs(entry - sl)
+                    sr_tp, sr_sl = sr.get_tp_sl(entry, direction, atr_sl)
+                    if sr_tp and sr_sl:
+                        tp, sl = sr_tp, sr_sl
+                except Exception:
+                    pass
+
             return tp, sl
         except Exception:
             return 0.0, 0.0
@@ -715,8 +758,13 @@ def main():
     )
     parser.add_argument("--csv", type=str, default=None)
     parser.add_argument("--symbol", type=str, default="USDJPY")
-    parser.add_argument("--no-save", action="store_true")
     parser.add_argument("--show-buffer", action="store_true")
+    parser.add_argument("--no-save", action="store_true")
+    parser.add_argument(
+        "--use-sr",
+        action="store_true",
+        help="Use S/R levels for TP/SL instead of ATR (support/resistance aware exits)",
+    )
     args = parser.parse_args()
 
     strategies = [s.strip() for s in args.strategies.split(",")]
@@ -755,6 +803,8 @@ def main():
 
     print(f"\nConfig: {args.threshold}-of-{n} must agree within "
           f"{args.lookback} candles")
+    if args.use_sr:
+        print(f"  S/R-aware TP/SL: ON (support/resistance levels for exits)")
 
     # Run
     engine = ConfluenceEngine(
@@ -764,6 +814,7 @@ def main():
         lookback=args.lookback,
         threshold=args.threshold,
         show_buffer=args.show_buffer,
+        use_sr=args.use_sr,
     )
 
     trades = engine.run()
