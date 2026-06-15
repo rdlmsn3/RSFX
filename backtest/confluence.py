@@ -30,7 +30,7 @@ from collections import Counter
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.data_loader import HistDataAdapter
 from core.market_data_store import MarketDataStore
@@ -41,7 +41,7 @@ from detectors.signal import PatternSignal
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger("confluence")
 
-from backtest import (
+from backtest.backtester import (
     CandleArrays,
     Trade,
     find_exit,
@@ -686,7 +686,7 @@ def _save_results(
     symbol: str,
 ) -> None:
     """Save results to timestamped CSV."""
-    base = Path(__file__).parent
+    base = Path(__file__).parent.parent / "results"
     run_ts = time.strftime("%Y%m%d_%H%M%S")
     filter_tag = "_".join(strategies)
     n = len(strategies)
@@ -780,7 +780,7 @@ def main():
         csv_path = Path(args.csv)
     else:
         csv_path = (
-            Path(__file__).parent / "data" / "DAT_ASCII_USDJPY_M1_202605.csv"
+            Path(__file__).parent.parent / "data" / "DAT_ASCII_USDJPY_M1_202605.csv"
         )
     print(f"\nLoading {csv_path}...")
     m1_df = HistDataAdapter().load(str(csv_path))
@@ -823,8 +823,8 @@ def main():
     if not args.no_save:
         data_file = (
             str(csv_path)
-            if not csv_path.is_relative_to(Path(__file__).parent)
-            else str(csv_path.relative_to(Path(__file__).parent))
+            if not csv_path.is_relative_to(Path(__file__).parent.parent)
+            else str(csv_path.relative_to(Path(__file__).parent.parent))
         )
         _save_results(
             trades, result, strategies,

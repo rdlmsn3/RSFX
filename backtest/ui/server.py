@@ -19,7 +19,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from core.data_loader import HistDataAdapter
 from core.market_data_store import MarketDataStore
@@ -28,7 +28,7 @@ from detectors.strategies.registry import STRATEGY_REGISTRY, _populate_registry
 app = FastAPI(title="RSFX Confluence Backtester")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-DATA_DIR = Path(__file__).parent.parent / "data"
+DATA_DIR = Path(__file__).parent.parent.parent / "data"
 
 # Cache: csv_path -> (MarketDataStore, candle_count, date_range)
 _store_cache: dict[str, tuple[MarketDataStore, int, str]] = {}
@@ -111,7 +111,7 @@ async def run_backtest(req: BacktestRequest):
     try:
         store, n_candles = get_store(req.csv_file, req.symbol)
 
-        from confluence_backtest import ConfluenceEngine
+        from backtest.confluence import ConfluenceEngine
 
         engine = ConfluenceEngine(
             data_store=store,
@@ -185,6 +185,11 @@ async def run_backtest(req: BacktestRequest):
         return {"error": str(exc), "traceback": traceback.format_exc()}
 
 
-if __name__ == "__main__":
+def main():
     import uvicorn
+    print("Starting RSFX Confluence UI on http://localhost:8502")
     uvicorn.run(app, host="0.0.0.0", port=8502)
+
+
+if __name__ == "__main__":
+    main()

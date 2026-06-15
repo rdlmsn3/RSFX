@@ -53,7 +53,7 @@ from typing import Optional, Any
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.data_loader import HistDataAdapter
 from core.market_data_store import MarketDataStore
@@ -863,7 +863,7 @@ def main() -> None:
     if args.csv:
         csv_path = Path(args.csv)
     else:
-        csv_path = Path(__file__).parent / "data" / "DAT_ASCII_USDJPY_M1_202605.csv"
+        csv_path = Path(__file__).parent.parent / "data" / "DAT_ASCII_USDJPY_M1_202605.csv"
     print(f"\nLoading {csv_path}...")
     m1_df = HistDataAdapter().load(str(csv_path))
     print(f"Loaded {len(m1_df):,} M1 candles  {m1_df.index[0]} → {m1_df.index[-1]}")
@@ -918,9 +918,9 @@ def main() -> None:
     _print_top_n(results, n=args.top)
 
     if not args.no_save:
-        base = Path(__file__).parent
+        base = Path(__file__).parent.parent / 'results'
         run_ts = time.strftime("%Y%m%d_%H%M%S")
-        data_file = str(csv_path.relative_to(base)) if csv_path.is_relative_to(base) else str(csv_path)
+        data_file = str(csv_path) if not csv_path.is_relative_to(Path(__file__).parent.parent) else str(csv_path.relative_to(Path(__file__).parent.parent))
         filter_tag = args.strategies.replace(",", "_").replace(" ", "") if args.strategies else "all"
         meta = {
             "timestamp": run_ts,

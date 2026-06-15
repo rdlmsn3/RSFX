@@ -1,23 +1,14 @@
-# Generated backtest outputs
-bt_*.csv
-bt_trades_*.csv
-backtest_results.csv
-backtest_trades.csv
-backtest_results_latest.csv
-backtest_trades_latest.csv
+# Backtest results (generated CSVs)
+results/
+
+# Legacy root-level results (pre-restructure)
+backtest_results*.csv
+backtest_trades*.csv
 backtest_output.txt
-
-# Correlation outputs
-corr_*.csv
-
-# Portfolio outputs
-portfolio_results.csv
-portfolio_top50.csv
-
-# Confluence outputs
+bt_*.csv
 confluence_*.csv
-confluence_results_latest.csv
-confluence_trades_latest.csv
+corr_*.csv
+portfolio_*.csv
 
 # Python
 __pycache__/

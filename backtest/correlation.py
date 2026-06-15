@@ -400,7 +400,7 @@ def run_analysis(
     Run full correlation analysis. Returns dict of DataFrames for programmatic use.
     """
     if output_dir is None:
-        output_dir = trades_path.parent
+        output_dir = Path(__file__).parent.parent / "results"
 
     print(f"Loading trades from {trades_path}...")
     trades = load_trades(trades_path)
@@ -493,13 +493,13 @@ def main():
     parser.add_argument(
         "--trades",
         type=Path,
-        default=Path(__file__).parent / "backtest_trades.csv",
+        default=Path(__file__).parent.parent / "results" / "backtest_trades_latest.csv",
         help="Path to backtest_trades.csv",
     )
     parser.add_argument(
         "--summary",
         type=Path,
-        default=Path(__file__).parent / "backtest_results.csv",
+        default=Path(__file__).parent.parent / "results" / "backtest_results_latest.csv",
         help="Path to backtest_results.csv",
     )
     parser.add_argument(

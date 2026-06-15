@@ -361,7 +361,7 @@ def run_analysis(
 ) -> dict:
     """Full optimization pipeline."""
     if output_dir is None:
-        output_dir = trades_path.parent
+        output_dir = Path(__file__).parent.parent / "results"
 
     print(f"Loading trades from {trades_path}...")
     trades = load_trades(trades_path)
@@ -423,11 +423,11 @@ def main():
     )
     parser.add_argument(
         "--trades", type=Path,
-        default=Path(__file__).parent / "backtest_trades.csv",
+        default=Path(__file__).parent.parent / "results" / "backtest_trades_latest.csv",
     )
     parser.add_argument(
         "--summary", type=Path,
-        default=Path(__file__).parent / "backtest_results.csv",
+        default=Path(__file__).parent.parent / "results" / "backtest_results_latest.csv",
     )
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--min-combo", type=int, default=2)

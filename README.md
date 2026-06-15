@@ -15,29 +15,29 @@ streamlit run app.py
 # → http://localhost:8501
 
 # Run backtester (all strategies)
-python3 backtest.py
+python3 -m backtest backtest
 
 # Run backtester (specific strategies)
-python3 backtest.py -s tweezer_reversal,h1_trend_m5_rsi,cci_ema
+python3 -m backtest backtest -s tweezer_reversal,h1_trend_m5_rsi,cci_ema
 
 # Run backtester with S/R-aware TP/SL
-python3 backtest.py -s h1_trend_m5_rsi --use-sr
+python3 -m backtest backtest -s h1_trend_m5_rsi --use-sr
 
 # Run strategy correlation analysis
-python3 strategy_correlation.py
+python3 -m backtest correlation
 
-# Run portfolio optimizer (2 + 3 strategy combos)
-python3 portfolio_optimizer.py
+# Run portfolio optimizer
+python3 -m backtest portfolio
 
 # Run confluence backtester
-python3 confluence_backtest.py -s tweezer_reversal,h1_trend_m5_rsi,cci_ema --lookback 5
-
-# Run confluence backtester with S/R-aware exits
-python3 confluence_backtest.py -s tweezer_reversal,h1_trend_m5_rsi,cci_ema --lookback 5 --use-sr
+python3 -m backtest confluence -s tweezer_reversal,h1_trend_m5_rsi,cci_ema --lookback 5
 
 # Run confluence web UI
-python3 confluence_ui/server.py
+python3 -m backtest ui
 # → http://localhost:8502
+
+# See all commands
+python3 -m backtest --help
 ```
 
 ---
@@ -76,14 +76,26 @@ All communication flows through the `EventBus`.
 ```
 RSFX/
 ├── app.py                          # Streamlit replay UI
-├── backtest.py                     # Independent strategy backtester (parallel)
-├── strategy_correlation.py         # Correlation analysis between strategies
-├── portfolio_optimizer.py          # Brute-force portfolio combinatorics
-├── confluence_backtest.py          # Signal-buffer confluence backtester
+├── requirements.txt
+├── README.md
 │
-├── confluence_ui/
-│   ├── index.html                  # Web UI frontend
-│   └── server.py                   # FastAPI backend (port 8502)
+├── backtest/                       # Backtest module (python3 -m backtest)
+│   ├── __init__.py
+│   ├── __main__.py                 # Unified entry point (subcommands)
+│   ├── backtester.py               # Parallel strategy backtester
+│   ├── correlation.py              # Strategy correlation analysis
+│   ├── portfolio.py                # Portfolio optimizer (brute-force)
+│   ├── confluence.py               # Signal-buffer confluence backtester
+│   └── ui/
+│       ├── index.html              # Confluence web UI frontend
+│       └── server.py               # FastAPI backend (port 8502)
+│
+├── results/                        # Generated backtest outputs (gitignored)
+│   ├── bt_*.csv                    # Backtest results + trades
+│   ├── corr_*.csv                  # Correlation outputs
+│   ├── portfolio_*.csv             # Portfolio optimizer outputs
+│   ├── confluence_*.csv            # Confluence outputs
+│   └── *_latest.csv                # Symlinks to most recent
 │
 ├── core/
 │   ├── data_loader.py              # Adapter-pattern CSV loaders
@@ -119,36 +131,37 @@ Interactive Streamlit-based market replay. Load any M1 CSV, play back candle-by-
 streamlit run app.py
 ```
 
-### 2. Backtester (`backtest.py`)
+### 2. Backtester (`python3 -m backtest backtest`)
 Parallel walk-forward backtester. Pre-computes indicators once, runs strategies across CPU cores.
 
 ```bash
 # All strategies
-python3 backtest.py
+python3 -m backtest backtest
 
 # Specific strategies (comma-separated, partial match)
-python3 backtest.py -s tweezer_reversal,h1_trend_m5_rsi
+python3 -m backtest backtest -s tweezer_reversal,h1_trend_m5_rsi
 
 # All H1 trend strategies
-python3 backtest.py -s h1_trend
+python3 -m backtest backtest -s h1_trend
 
 # Custom data file
-python3 backtest.py --csv data/DAT_ASCII_EURUSD_M1_202605.csv --symbol EURUSD
+python3 -m backtest backtest --csv data/DAT_ASCII_EURUSD_M1_202605.csv --symbol EURUSD
 
 # With S/R-aware TP/SL (support/resistance levels for exits)
-python3 backtest.py -s h1_trend_m5_rsi --use-sr
+python3 -m backtest backtest -s h1_trend_m5_rsi --use-sr
 
 # Options
-python3 backtest.py -s tweezer_reversal --workers 4 --top 10 --no-save
+python3 -m backtest backtest -s tweezer_reversal --workers 4 --top 10 --no-save
 ```
 
-**Output:** Timestamped CSVs with metadata (data file, symbol, strategies used, run time). Latest symlink for convenience.
+**Output:** Timestamped CSVs in `results/` with metadata (data file, symbol, strategies, run time). Latest symlink for convenience.
 
-### 3. Strategy Correlation (`strategy_correlation.py`)
+### 3. Strategy Correlation (`python3 -m backtest correlation`)
 Analyzes relationships between strategies based on backtest results.
 
 ```bash
-python3 strategy_correlation.py
+python3 -m backtest correlation
+python3 -m backtest correlation --trades results/bt_trades_xxx.csv --summary results/bt_xxx.csv
 ```
 
 **Produces:**
@@ -159,91 +172,68 @@ python3 strategy_correlation.py
 - **Diversification scores** — Per-strategy diversification ranking
 - **Portfolio baskets** — Top 20 lowest mutual correlation combos
 
-**Output CSVs:** `corr_overlap.csv`, `corr_pnl.csv`, `corr_equity.csv`, `corr_confluence.csv`, `corr_baskets.csv`, `corr_diversification.csv`
+**Output:** `results/corr_*.csv`
 
-### 4. Portfolio Optimizer (`portfolio_optimizer.py`)
+### 4. Portfolio Optimizer (`python3 -m backtest portfolio`)
 Brute-force evaluation of all 2-strategy and 3-strategy combinations.
 
 ```bash
-python3 portfolio_optimizer.py                      # 2 + 3 combos
-python3 portfolio_optimizer.py --max-combo 4        # also test 4-strategy
-python3 portfolio_optimizer.py --top 30             # show top 30
+python3 -m backtest portfolio                          # 2 + 3 combos
+python3 -m backtest portfolio --max-combo 4            # also test 4-strategy
+python3 -m backtest portfolio --top 30                 # show top 30
 ```
 
-**Metrics per combo:** Sharpe ratio, Sortino ratio, Calmar ratio, Max DD, Profit Factor, total PnL, win rate.
+**Metrics:** Sharpe ratio, Sortino ratio, Calmar ratio, Max DD, Profit Factor, total PnL, win rate.
 
-**Output:** `portfolio_results.csv` (all 22K+ combos), `portfolio_top50.csv`
+**Output:** `results/portfolio_results.csv`, `results/portfolio_top50.csv`
 
-### 5. Confluence Backtester (`confluence_backtest.py`)
+### 5. Confluence Backtester (`python3 -m backtest confluence`)
 Signal-buffer confluence — strategies fire independently, trades execute when N out of M agree within a candle window.
 
 ```bash
 # 2-of-3 must agree within 5 candles
-python3 confluence_backtest.py -s tweezer_reversal,h1_trend_m5_rsi,cci_ema --lookback 5
+python3 -m backtest confluence -s tweezer_reversal,h1_trend_m5_rsi,cci_ema --lookback 5
 
 # 3-of-5 must agree
-python3 confluence_backtest.py -s tweezer_reversal,h1_trend_m5_rsi,cci_ema,ema_ribbon_pullback,marubozu_trend --lookback 5 --threshold 3
+python3 -m backtest confluence -s tweezer_reversal,h1_trend_m5_rsi,cci_ema,ema_ribbon_pullback,marubozu_trend --lookback 5 --threshold 3
 
 # With S/R-aware exits
-python3 confluence_backtest.py -s tweezer_reversal,h1_trend_m5_rsi,cci_ema --lookback 5 --use-sr
-
-# See who voted when
-python3 confluence_backtest.py -s tweezer_reversal,h1_trend_m5_rsi,cci_ema --lookback 5 --show-votes
+python3 -m backtest confluence -s tweezer_reversal,h1_trend_m5_rsi,cci_ema --lookback 5 --use-sr
 ```
 
 **How it works:**
 1. Each strategy evaluates independently at every candle
 2. When a strategy fires, its signal enters a buffer (active for N candles)
-3. If another strategy fires within that window and agrees on direction → confluence trade
+3. If another strategy fires within that window and agrees → confluence trade
 4. TP/SL from the most recent (triggering) signal
 
-**Output:** Timestamped CSVs with metadata.
+**Output:** `results/confluence_*.csv`
 
 ### 6. Support/Resistance Detection (`detectors/support_resistance.py`)
-Pivot-based S/R with ATR-adaptive tolerance — auto-tunes for any pair, no manual parameters needed.
+Pivot-based S/R with ATR-adaptive tolerance — auto-tunes for any pair.
 
 ```python
 from detectors.support_resistance import SupportResistance
 
 sr = SupportResistance(df)  # ATR-adaptive tolerance
-levels = sr.find_levels()   # list of SRLevel
+levels = sr.find_levels()
 
-# Query nearest levels
 support = sr.nearest_support(150.250)
 resistance = sr.nearest_resistance(150.250)
-
-# Get S/R-aware TP/SL
 tp, sl = sr.get_tp_sl(150.250, "LONG", atr_sl=0.30)
 ```
 
-**How it works:**
-1. Find swing highs/lows using rolling window extrema
-2. Cluster nearby pivots within ATR-based tolerance
-3. Score by touch count, recency, proximity, and cleanliness
-4. Returns sorted levels (strongest first)
+**ATR-adaptive tolerance:** `tolerance = ATR(14) × 0.3` — scales with pair volatility automatically.
 
-**ATR-adaptive tolerance:** `tolerance = ATR(14) × 0.3` — automatically scales with pair volatility:
-- EURUSD (ATR ~0.0008) → tolerance ~0.00024 (2.4 pips)
-- USDJPY (ATR ~0.008) → tolerance ~0.0024 (0.24 pips)
-- GBPJPY (ATR ~0.05) → tolerance ~0.015 (1.5 pips)
-
-**Toggle in backtester:** `--use-sr` flag overrides ATR-based TP/SL with S/R-targeted exits.
-
-### 7. Confluence Web UI (`confluence_ui/`)
+### 7. Confluence Web UI (`python3 -m backtest ui`)
 Browser-based interface for the confluence backtester.
 
 ```bash
-python3 confluence_ui/server.py
+python3 -m backtest ui
 # → http://localhost:8502
 ```
 
-**Features:**
-- Searchable multi-select strategy picker (72 strategies)
-- Quick presets: Top 3, H1 Trend, Divergence
-- Data file selector with file size display
-- Configurable lookback + threshold
-- Results: stats, trade table, strategy participation chart
-- Settings persist across sessions (localStorage)
+**Features:** Searchable strategy picker, quick presets, data file selector, configurable lookback/threshold, results with trade table + participation chart, localStorage persistence.
 
 ---
 
@@ -257,15 +247,11 @@ python3 confluence_ui/server.py
 | ema_ribbon_pullback | 2,138 | 54.5% | +1,282.5 | 1.53 | 0.33% |
 | marubozu_trend | 615 | 67.2% | +736.9 | 2.58 | 0.18% |
 
-### S/R-Aware Exits (Toggle Comparison)
+### S/R-Aware Exits
 | Strategy | Mode | Trades | Win% | PnL (pips) | PF |
 |---|---|---|---|---|---|
 | h1_trend_m5_rsi | ATR | 731 | 62.2% | +860.2 | 2.36 |
 | h1_trend_m5_rsi | **S/R** | 323 | **64.4%** | +773.2 | **2.68** |
-| tweezer_reversal | ATR | 2,035 | 55.3% | +1,110.8 | 1.57 |
-| tweezer_reversal | S/R | 937 | 57.0% | +322.6 | 1.17 |
-
-S/R toggle helps some strategies (h1_trend_m5_rsi: WR +2.2%, PF +0.32) but not others — depends on market regime. Works best in ranging markets with clear S/R zones.
 
 ### Best Portfolio Combos (3-strategy)
 | Combo | Sharpe | PnL (pips) | Win% | PF |
@@ -274,7 +260,7 @@ S/R toggle helps some strategies (h1_trend_m5_rsi: WR +2.2%, PF +0.32) but not o
 | tweezer + h1_rsi + h1_macd | +37.6 | +2,283 | 57.7% | 1.78 |
 | tweezer + h1_rsi + h1_stoch | +37.2 | +2,288 | 57.8% | 1.82 |
 
-### Confluence Trading (Signal-Buffer)
+### Confluence Trading
 | Config | Trades | Win% | PnL (pips) | PF |
 |---|---|---|---|---|
 | Independent (sum) | 3,486 | ~57% | +2,324.9 | ~1.7 |
@@ -300,29 +286,27 @@ class MyStrategy(BaseStrategy):
         # ... your logic ...
         return [PatternSignal(name="MY_SIGNAL", ...)]
 
-    # Optional: fast path for backtester (pre-compute indicators)
+    # Optional: fast path for backtester
     def precompute(self, arrays, tf_arrays) -> dict:
-        # Return pre-computed NumPy arrays
         return {"ema_20": ..., "rsi_14": ...}
 
     def evaluate_fast(self, i, arrays, precomputed) -> list[PatternSignal]:
-        # Use pre-computed arrays instead of DataFrame slicing
         if precomputed["rsi_14"][i] < 30:
             return [PatternSignal(...)]
         return []
 ```
 
-Place in `detectors/strategies/` — auto-discovered by the registry. No other files need to change.
+Place in `detectors/strategies/` — auto-discovered by the registry.
 
 ---
 
 ## Performance Notes
 
-- Higher timeframes (M5, H1, D1) pre-computed **once** at load time via `pd.DataFrame.resample()`
-- `get_window()` uses `searchsorted()` (O log n) — no full-frame copies during playback
-- Backtester pre-computes indicators once per strategy, runs walk-forward loop with NumPy arrays only (~0.01s/strategy vs ~8s/strategy with pandas rolling)
+- Higher timeframes pre-computed **once** at load time via `pd.DataFrame.resample()`
+- `get_window()` uses `searchsorted()` (O log n) — no full-frame copies
+- Backtester pre-computes indicators once, runs walk-forward with NumPy arrays only (~0.01s/strategy)
 - Parallel execution across CPU cores via `ProcessPoolExecutor`
-- S/R detection uses ATR-adaptive tolerance — auto-tunes for any pair without manual parameters
+- S/R detection uses ATR-adaptive tolerance — auto-tunes for any pair
 - Tested on 2M+ row DataFrames without noticeable playback lag
 
 ---
