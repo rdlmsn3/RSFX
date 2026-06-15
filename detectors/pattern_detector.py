@@ -3,9 +3,11 @@ detectors/pattern_detector.py
 ------------------------------
 Strategy-based pattern detection with multi-timeframe support.
 
-Delegates evaluation to a pluggable BaseStrategy instance.
-Fetches M1/M5/H1 windows and passes all to the strategy.
+Delegates evaluation to one or more pluggable BaseStrategy instances.
+Fetches M1/M5/H1 windows and passes all to each strategy.
 Generates signals with "direction" in metadata (LONG / SHORT).
+
+Supports single-strategy and multi-strategy (confluence) modes.
 """
 
 from __future__ import annotations
@@ -35,20 +37,28 @@ class PatternDetector:
         symbol: str = "EURUSD",
         lookback: int = 200,
         strategy: Optional[BaseStrategy] = None,
+        strategies: Optional[list[BaseStrategy]] = None,
     ) -> None:
         self._bus = event_bus
         self._store = data_store
         self._symbol = symbol
         self._lookback = lookback
-        self._strategy = strategy or EMAStochasticStrategy()
+
+        # Multi-strategy support
+        if strategies:
+            self._strategies = list(strategies)
+        elif strategy:
+            self._strategies = [strategy]
+        else:
+            self._strategies = [EMAStochasticStrategy()]
 
         self._signals: list[PatternSignal] = []
         self._bus.subscribe(MarketTickEvent, self._on_market_tick)
 
+        names = ", ".join(s.name for s in self._strategies)
         logger.info(
-            "PatternDetector initialised (strategy=%s, lookback=%d).",
-            self._strategy.name,
-            lookback,
+            "PatternDetector initialised (strategies=%s, lookback=%d).",
+            names, lookback,
         )
 
     # ------------------------------------------------------------------
@@ -57,14 +67,31 @@ class PatternDetector:
 
     @property
     def strategy(self) -> BaseStrategy:
-        return self._strategy
+        """Primary strategy (first in list)."""
+        return self._strategies[0]
 
     @strategy.setter
     def strategy(self, new_strategy: BaseStrategy) -> None:
-        """Hot-swap strategy at runtime."""
-        self._strategy = new_strategy
+        """Hot-swap primary strategy (replaces the list with a single strategy)."""
+        self._strategies = [new_strategy]
         self._signals.clear()
         logger.info("Strategy swapped to %s", new_strategy.name)
+
+    @property
+    def strategies(self) -> list[BaseStrategy]:
+        return list(self._strategies)
+
+    @strategies.setter
+    def strategies(self, new_strategies: list[BaseStrategy]) -> None:
+        """Set multiple strategies for confluence mode."""
+        self._strategies = list(new_strategies)
+        self._signals.clear()
+        names = ", ".join(s.name for s in self._strategies)
+        logger.info("Strategies set to [%s]", names)
+
+    @property
+    def is_confluence_mode(self) -> bool:
+        return len(self._strategies) > 1
 
     @property
     def signals(self) -> list[PatternSignal]:
@@ -104,7 +131,52 @@ class PatternDetector:
         windows: dict[str, pd.DataFrame],
         current_timestamp: pd.Timestamp,
     ) -> list[PatternSignal]:
-        return self._strategy.evaluate(windows, current_timestamp)
+        """Evaluate all strategies and return combined signals."""
+        all_signals = []
+        for s in self._strategies:
+            signals = s.evaluate(windows, current_timestamp)
+            for sig in signals:
+                sig.metadata["strategy"] = s.name
+            all_signals.extend(signals)
+        return all_signals
+
+    # ------------------------------------------------------------------
+    # Confluence detection
+    # ------------------------------------------------------------------
+
+    def _mark_confluence(
+        self,
+        signals: list[PatternSignal],
+        candle_timestamp: pd.Timestamp,
+    ) -> list[PatternSignal]:
+        """
+        Mark confluence: when 2+ strategies agree on direction
+        on the same candle.
+
+        Adds metadata["confluence"] = True/False and
+        metadata["confluence_count"] = N
+        """
+        if len(self._strategies) <= 1:
+            for sig in signals:
+                sig.metadata["confluence"] = False
+                sig.metadata["confluence_count"] = 1
+            return signals
+
+        # Group by direction
+        direction_counts: dict[str, int] = {}
+        for sig in signals:
+            d = sig.metadata.get("direction", "")
+            if d in ("LONG", "SHORT"):
+                direction_counts[d] = direction_counts.get(d, 0) + 1
+
+        # Mark each signal
+        for sig in signals:
+            d = sig.metadata.get("direction", "")
+            count = direction_counts.get(d, 0)
+            sig.metadata["confluence"] = count >= 2
+            sig.metadata["confluence_count"] = count
+
+        return signals
 
     # ------------------------------------------------------------------
     # Event handler
@@ -114,6 +186,9 @@ class PatternDetector:
         windows = self._fetch_windows(event.timestamp)
 
         new_signals = self.scan_for_patterns(windows, event.timestamp)
+
+        # Mark confluence if multi-strategy
+        new_signals = self._mark_confluence(new_signals, event.timestamp)
 
         for signal in new_signals:
             self._signals.append(signal)

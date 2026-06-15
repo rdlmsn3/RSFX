@@ -226,6 +226,52 @@ class ChartRenderer:
         cls._apply_layout(fig, symbol, timeframe, rows)
         return fig
 
+    @classmethod
+    def add_sr_levels(
+        cls,
+        fig: go.Figure,
+        df: pd.DataFrame,
+        row: int,
+    ) -> None:
+        """
+        Add support/resistance level lines to the chart.
+        Computes S/R on the visible window (fast, no caching).
+        """
+        if df.empty or len(df) < 20:
+            return
+
+        try:
+            from detectors.support_resistance import SupportResistance
+            sr = SupportResistance(df)
+            levels = sr.find_levels()
+
+            if not levels:
+                return
+
+            # Show top 5 strongest levels
+            for level in levels[:5]:
+                color = "#3fb950" if level.level_type == "support" else "#f85149"
+                opacity = 0.3 + level.strength * 0.5  # stronger = more opaque
+                label = f"{'S' if level.level_type == 'support' else 'R'} {level.price:.5f} ({level.strength:.2f})"
+
+                fig.add_hline(
+                    y=level.price,
+                    line=dict(color=color, width=1, dash="dot"),
+                    opacity=opacity,
+                    row=row, col=1,
+                )
+                # Label at right edge
+                fig.add_annotation(
+                    x=df.index[-1], y=level.price,
+                    text=label,
+                    showarrow=False,
+                    font=dict(size=9, color=color, family=FONT_FAMILY),
+                    xanchor="left",
+                    row=row, col=1,
+                )
+        except Exception as exc:
+            logger.debug("S/R overlay error: %s", exc)
+
     # ------------------------------------------------------------------
     # Building blocks
     # ------------------------------------------------------------------
@@ -261,9 +307,12 @@ class ChartRenderer:
     ) -> None:
         """
         Render L/S markers + TP/SL lines for any signal with "direction" in metadata.
+        Confluence signals (2+ strategies agree) get larger markers with glow.
         """
         long_x, long_y, long_meta = [], [], []
         short_x, short_y, short_meta = [], [], []
+        conf_long_x, conf_long_y, conf_long_meta = [], [], []
+        conf_short_x, conf_short_y, conf_short_meta = [], [], []
         tp_sl_lines = []  # (x0, x1, y, color, label)
 
         for signal in patterns:
@@ -286,58 +335,110 @@ class ChartRenderer:
             tp = signal.metadata.get("take_profit", 0)
             sl = signal.metadata.get("stop_loss", 0)
             atr = signal.metadata.get("atr", 0)
+            is_confluence = signal.metadata.get("confluence", False)
+            conf_count = signal.metadata.get("confluence_count", 1)
 
             hover_text = (
-                f"<b>{direction}</b><br>"
+                f"<b>{direction}</b>"
+                f"{' (CONFLUENCE)' if is_confluence else ''}<br>"
                 f"Strategy: {strategy_name}<br>"
+                f"Confluence: {conf_count} strategies agree<br>"
                 f"Entry: {entry:.5f}<br>"
                 f"TP: {tp:.5f}<br>"
                 f"SL: {sl:.5f}<br>"
                 f"ATR: {atr:.5f}"
             )
 
-            if direction == "LONG":
-                long_x.append(signal.end_time)
-                long_y.append(candle["high"] + candle_range * 0.3)
-                long_meta.append(hover_text)
-            elif direction == "SHORT":
-                short_x.append(signal.end_time)
-                short_y.append(candle["low"] - candle_range * 0.3)
-                short_meta.append(hover_text)
+            if is_confluence:
+                if direction == "LONG":
+                    conf_long_x.append(signal.end_time)
+                    conf_long_y.append(candle["high"] + candle_range * 0.5)
+                    conf_long_meta.append(hover_text)
+                else:
+                    conf_short_x.append(signal.end_time)
+                    conf_short_y.append(candle["low"] - candle_range * 0.5)
+                    conf_short_meta.append(hover_text)
+            else:
+                if direction == "LONG":
+                    long_x.append(signal.end_time)
+                    long_y.append(candle["high"] + candle_range * 0.3)
+                    long_meta.append(hover_text)
+                else:
+                    short_x.append(signal.end_time)
+                    short_y.append(candle["low"] - candle_range * 0.3)
+                    short_meta.append(hover_text)
 
-            # TP/SL horizontal lines
-            if tp and sl:
-                # Line extends from signal candle to right edge of visible data
+            # TP/SL horizontal lines (only for confluence signals)
+            if tp and sl and is_confluence:
                 x_start = signal.end_time
                 x_end = df.index[-1]
-
-                tp_sl_lines.append((x_start, x_end, tp, "#3fb950", f"TP {tp:.5f}"))
+                tp_sl_lines.append((x0 := x_start, x_end, tp, "#3fb950", f"TP {tp:.5f}"))
                 tp_sl_lines.append((x_start, x_end, sl, "#f85149", f"SL {sl:.5f}"))
 
-        # Long markers
+        # Regular long markers
         if long_x:
             fig.add_trace(go.Scatter(
                 x=long_x, y=long_y,
                 mode="text",
                 text=["L"] * len(long_x),
-                textfont=dict(size=16, color=BULL_COLOR, family=FONT_FAMILY, weight="bold"),
+                textfont=dict(size=14, color=BULL_COLOR, family=FONT_FAMILY),
                 textposition="middle center",
                 showlegend=False,
                 hoverinfo="text",
                 hovertext=long_meta,
             ), row=row, col=1)
 
-        # Short markers
+        # Confluence long markers (larger, with glow effect)
+        if conf_long_x:
+            fig.add_trace(go.Scatter(
+                x=conf_long_x, y=conf_long_y,
+                mode="markers+text",
+                marker=dict(
+                    size=16,
+                    color=BULL_COLOR,
+                    line=dict(color="white", width=2),
+                    opacity=0.9,
+                ),
+                text=["L"] * len(conf_long_x),
+                textfont=dict(size=14, color="white", family=FONT_FAMILY, weight="bold"),
+                textposition="middle center",
+                name=f"Confluence LONG",
+                showlegend=True,
+                hoverinfo="text",
+                hovertext=conf_long_meta,
+            ), row=row, col=1)
+
+        # Regular short markers
         if short_x:
             fig.add_trace(go.Scatter(
                 x=short_x, y=short_y,
                 mode="text",
                 text=["S"] * len(short_x),
-                textfont=dict(size=16, color=BEAR_COLOR, family=FONT_FAMILY, weight="bold"),
+                textfont=dict(size=14, color=BEAR_COLOR, family=FONT_FAMILY),
                 textposition="middle center",
                 showlegend=False,
                 hoverinfo="text",
                 hovertext=short_meta,
+            ), row=row, col=1)
+
+        # Confluence short markers
+        if conf_short_x:
+            fig.add_trace(go.Scatter(
+                x=conf_short_x, y=conf_short_y,
+                mode="markers+text",
+                marker=dict(
+                    size=16,
+                    color=BEAR_COLOR,
+                    line=dict(color="white", width=2),
+                    opacity=0.9,
+                ),
+                text=["S"] * len(conf_short_x),
+                textfont=dict(size=14, color="white", family=FONT_FAMILY, weight="bold"),
+                textposition="middle center",
+                name=f"Confluence SHORT",
+                showlegend=True,
+                hoverinfo="text",
+                hovertext=conf_short_meta,
             ), row=row, col=1)
 
         # TP/SL lines

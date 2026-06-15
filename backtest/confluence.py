@@ -743,7 +743,8 @@ def main():
     )
     parser.add_argument(
         "--strategies", "-s",
-        type=str, required=True,
+        type=str,
+        default=None,
         help="Comma-separated strategy names",
     )
     parser.add_argument(
@@ -763,11 +764,55 @@ def main():
     parser.add_argument(
         "--use-sr",
         action="store_true",
-        help="Use S/R levels for TP/SL instead of ATR (support/resistance aware exits)",
+        help="Use S/R levels for TP/SL instead of ATR",
+    )
+    parser.add_argument(
+        "--bucket",
+        type=str, default=None,
+        help="Load config from bucket JSON file (overrides --strategies, --lookback, etc.)",
+    )
+    parser.add_argument(
+        "--save-bucket",
+        type=str, default=None, metavar="NAME",
+        help="Save current config as a bucket JSON file",
+    )
+    parser.add_argument(
+        "--list-buckets",
+        action="store_true",
+        help="List all available buckets and exit",
     )
     args = parser.parse_args()
 
-    strategies = [s.strip() for s in args.strategies.split(",")]
+    # List buckets
+    if args.list_buckets:
+        from backtest.buckets import StrategyBucket, BUCKETS_DIR
+        buckets = StrategyBucket.list_buckets()
+        if not buckets:
+            print(f"No buckets found in {BUCKETS_DIR}")
+            print("Create one with: --save-bucket 'My Bucket'")
+        else:
+            print(f"\nAvailable buckets ({len(buckets)}):")
+            for b in buckets:
+                sr = " +S/R" if b["use_sr"] else ""
+                results = f" (backtest: {b['has_results']})" if b["has_results"] else ""
+                print(f"  {b['name']:30s} {b['strategy_count']} strategies  lb=? t={b['threshold']}{sr}{results}")
+                print(f"    {b['path']}")
+        return
+
+    # Load from bucket if specified
+    if args.bucket:
+        from backtest.buckets import StrategyBucket
+        bucket = StrategyBucket.load(Path(args.bucket))
+        print(f"Loaded bucket: {bucket}")
+        strategies = bucket.strategies
+        args.lookback = bucket.lookback
+        args.threshold = bucket.threshold
+        args.use_sr = bucket.use_sr
+    else:
+        if not args.strategies:
+            parser.error("--strategies is required (or use --bucket)")
+        strategies = [s.strip() for s in args.strategies.split(",")]
+
     n = len(strategies)
 
     print("=" * 80)
@@ -831,6 +876,27 @@ def main():
             args.lookback, args.threshold,
             data_file, args.symbol,
         )
+
+    # Save as bucket if requested
+    if args.save_bucket:
+        from backtest.buckets import StrategyBucket
+        bucket = StrategyBucket.from_strategies(
+            name=args.save_bucket,
+            strategies=strategies,
+            use_sr=args.use_sr,
+            lookback=args.lookback,
+            threshold=args.threshold,
+            description=f"Auto-saved from confluence backtest on {csv_path.name}",
+        )
+        bucket.backtest_result = {
+            "total_trades": result.get("total_trades", 0),
+            "win_rate": result.get("win_rate", 0),
+            "total_pnl_pips": result.get("total_pnl_pips", 0),
+            "profit_factor": result.get("profit_factor", 0),
+        }
+        path = bucket.save()
+        print(f"\n✅ Bucket saved: {path}")
+        print(f"   {bucket}")
 
 
 if __name__ == "__main__":

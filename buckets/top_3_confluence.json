@@ -1,0 +1,19 @@
+{
+  "name": "Top 3 Confluence",
+  "strategies": [
+    "tweezer_reversal",
+    "h1_trend_m5_rsi",
+    "cci_ema"
+  ],
+  "use_sr": true,
+  "lookback": 5,
+  "threshold": 2,
+  "description": "Auto-saved from confluence backtest on DAT_ASCII_USDJPY_M1_202605.csv",
+  "created": "2026-06-15",
+  "backtest_result": {
+    "total_trades": 327,
+    "win_rate": 57.19,
+    "total_pnl_pips": 241.61,
+    "profit_factor": 1.54
+  }
+}

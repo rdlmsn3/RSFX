@@ -259,74 +259,155 @@ def _render_sidebar() -> None:
             st.info("Load a CSV file to begin.")
             return
 
-        # ---- Strategy Selection ---------------------------------------------
+        # ---- Strategy Mode ------------------------------------------------
         st.markdown("### Strategy")
-
-        # Filter out existing strategies from category list (they're legacy)
-        available_categories = [c for c in CATEGORY_ORDER if c not in ("Single TF - Existing", "Two TF - Existing")]
-
-        # Category dropdown
-        selected_category = st.selectbox(
-            "Category",
-            options=available_categories,
+        strategy_mode = st.radio(
+            "Mode",
+            options=["Single", "Bucket"],
             index=0,
+            horizontal=True,
             label_visibility="collapsed",
         )
 
-        # Get strategies in this category
-        category_strategies = [
-            name for name, info in STRATEGY_REGISTRY.items()
-            if info["category"] == selected_category
-        ]
+        if strategy_mode == "Single":
+            # ---- Single Strategy Selection --------------------------------
+            available_categories = [c for c in CATEGORY_ORDER
+                                    if c not in ("Single TF - Existing", "Two TF - Existing")]
 
-        if category_strategies:
-            # Strategy dropdown
-            selected_strategy = st.selectbox(
-                "Strategy",
-                options=category_strategies,
+            selected_category = st.selectbox(
+                "Category",
+                options=available_categories,
                 index=0,
                 label_visibility="collapsed",
             )
 
-            # Show description
-            st.caption(STRATEGY_REGISTRY[selected_strategy]["description"])
+            category_strategies = [
+                name for name, info in STRATEGY_REGISTRY.items()
+                if info["category"] == selected_category
+            ]
 
-            # Dynamic parameter controls
-            st.markdown("#### Parameters")
-            params = {}
-            for param_name, param_info in STRATEGY_REGISTRY[selected_strategy]["params"].items():
-                if param_info["type"] == "int":
-                    params[param_name] = st.slider(
-                        param_name,
-                        min_value=param_info["min"],
-                        max_value=param_info["max"],
-                        value=param_info["default"],
-                    )
-                elif param_info["type"] == "float":
-                    params[param_name] = st.slider(
-                        param_name,
-                        min_value=float(param_info["min"]),
-                        max_value=float(param_info["max"]),
-                        value=float(param_info["default"]),
-                        step=0.1,
-                    )
+            if category_strategies:
+                selected_strategy = st.selectbox(
+                    "Strategy",
+                    options=category_strategies,
+                    index=0,
+                    label_visibility="collapsed",
+                )
 
-            # Auto-apply strategy on selection change
-            if selected_strategy != st.session_state.get("active_strategy"):
-                strategy_class = get_strategy_class(selected_strategy)
-                new_strategy = strategy_class(**params)
-                st.session_state.detector.strategy = new_strategy
-                st.session_state.active_strategy = selected_strategy
-                st.rerun()
+                st.caption(STRATEGY_REGISTRY[selected_strategy]["description"])
 
-            # Auto-apply on param change
-            current_params = st.session_state.get("strategy_params", {})
-            if params != current_params:
-                strategy_class = get_strategy_class(selected_strategy)
-                new_strategy = strategy_class(**params)
-                st.session_state.detector.strategy = new_strategy
-                st.session_state.strategy_params = params
-                st.rerun()
+                st.markdown("#### Parameters")
+                params = {}
+                for param_name, param_info in STRATEGY_REGISTRY[selected_strategy]["params"].items():
+                    if param_info["type"] == "int":
+                        params[param_name] = st.slider(
+                            param_name,
+                            min_value=param_info["min"],
+                            max_value=param_info["max"],
+                            value=param_info["default"],
+                        )
+                    elif param_info["type"] == "float":
+                        params[param_name] = st.slider(
+                            param_name,
+                            min_value=float(param_info["min"]),
+                            max_value=float(param_info["max"]),
+                            value=float(param_info["default"]),
+                            step=0.1,
+                        )
+
+                # Auto-apply strategy on selection change
+                if selected_strategy != st.session_state.get("active_strategy"):
+                    strategy_class = get_strategy_class(selected_strategy)
+                    new_strategy = strategy_class(**params)
+                    st.session_state.detector.strategy = new_strategy
+                    st.session_state.active_strategy = selected_strategy
+                    st.rerun()
+
+                # Auto-apply on param change
+                current_params = st.session_state.get("strategy_params", {})
+                if params != current_params:
+                    strategy_class = get_strategy_class(selected_strategy)
+                    new_strategy = strategy_class(**params)
+                    st.session_state.detector.strategy = new_strategy
+                    st.session_state.strategy_params = params
+                    st.rerun()
+
+        else:
+            # ---- Bucket Mode -----------------------------------------------
+            from backtest.buckets import StrategyBucket, BUCKETS_DIR
+
+            buckets = StrategyBucket.list_buckets()
+            bucket_names = [b["name"] for b in buckets]
+
+            if not bucket_names:
+                st.info("No buckets found. Create one from the backtest:")
+                st.code("python3 -m backtest confluence -s X,Y,Z --save-bucket 'My Bucket'")
+            else:
+                selected_bucket_name = st.selectbox(
+                    "Bucket",
+                    options=bucket_names,
+                    index=0,
+                    label_visibility="collapsed",
+                )
+
+                # Find the selected bucket info
+                bucket_info = next(b for b in buckets if b["name"] == selected_bucket_name)
+
+                # Load full bucket
+                bucket = StrategyBucket.load(Path(bucket_info["path"]))
+
+                # Display bucket config
+                st.markdown(f"**{bucket.name}**")
+                st.caption(bucket.description or f"{len(bucket.strategies)} strategies")
+
+                # Config display
+                config_cols = st.columns(3)
+                config_cols[0].metric("Strategies", len(bucket.strategies))
+                config_cols[1].metric("Threshold", f"{bucket.threshold}-of-{len(bucket.strategies)}")
+                config_cols[2].metric("S/R", "ON" if bucket.use_sr else "OFF")
+
+                # Strategy list
+                with st.expander("Strategies in bucket"):
+                    for s in bucket.strategies:
+                        info = STRATEGY_REGISTRY.get(s, {})
+                        cat = info.get("category", "?")
+                        st.markdown(f"- `{s}` ({cat})")
+
+                # Backtest results if available
+                if bucket.backtest_result:
+                    with st.expander("Backtest Results"):
+                        br = bucket.backtest_result
+                        r1, r2, r3, r4 = st.columns(4)
+                        r1.metric("Trades", br.get("total_trades", 0))
+                        r2.metric("Win Rate", f"{br.get('win_rate', 0):.1f}%")
+                        r3.metric("PnL", f"{br.get('total_pnl_pips', 0):+.1f}")
+                        r4.metric("PF", f"{br.get('profit_factor', 0):.2f}")
+
+                # Apply bucket
+                if (st.session_state.get("active_bucket") != bucket.name or
+                        st.session_state.get("active_bucket_use_sr") != bucket.use_sr):
+                    # Build strategy instances
+                    strategy_instances = []
+                    for s_name in bucket.strategies:
+                        if s_name in STRATEGY_REGISTRY:
+                            cls = STRATEGY_REGISTRY[s_name]["class"]
+                            strategy_instances.append(cls())
+
+                    st.session_state.detector.strategies = strategy_instances
+                    st.session_state.active_bucket = bucket.name
+                    st.session_state.active_bucket_use_sr = bucket.use_sr
+                    st.session_state.active_strategy = None
+                    st.rerun()
+
+        # ---- S/R Toggle ---------------------------------------------------
+        st.markdown("#### Support / Resistance")
+        use_sr = st.toggle(
+            "Show S/R Levels on Chart",
+            value=st.session_state.get("show_sr", False),
+        )
+        if use_sr != st.session_state.get("show_sr"):
+            st.session_state.show_sr = use_sr
+            st.rerun()
 
         st.markdown("---")
 
@@ -433,13 +514,21 @@ def _render_status() -> None:
     st.markdown(badge, unsafe_allow_html=True)
 
     # Strategy info row
-    active_strategy = getattr(st.session_state, 'active_strategy', 'ema_stochastic_mtf')
-    strategy_info = STRATEGY_REGISTRY.get(active_strategy, {})
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Strategy", active_strategy.replace("_", " ").title())
-    c2.metric("Timeframes", ", ".join(strategy_info.get("timeframes", ["M1", "M5", "H1"])))
-    c3.metric("Category", strategy_info.get("category", "Two TF - Existing"))
+    if det.is_confluence_mode:
+        strategy_names = [s.name for s in det.strategies]
+        n_strats = len(strategy_names)
+        active_bucket = getattr(st.session_state, 'active_bucket', '')
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Mode", f"Bucket ({n_strats} strategies)")
+        c2.metric("Bucket", active_bucket or "Custom")
+        c3.metric("Confluence", f"Any {det.signals[-1].metadata.get('confluence_count', 2) if det.signals else 2}+ agree")
+    else:
+        active_strategy = getattr(st.session_state, 'active_strategy', 'ema_stochastic_mtf')
+        strategy_info = STRATEGY_REGISTRY.get(active_strategy, {})
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Strategy", active_strategy.replace("_", " ").title())
+        c2.metric("Timeframes", ", ".join(strategy_info.get("timeframes", ["M1", "M5", "H1"])))
+        c3.metric("Category", strategy_info.get("category", "Two TF - Existing"))
 
     # Metrics row
     c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -488,6 +577,11 @@ def _render_chart() -> None:
             timeframe=tf,
             max_candles=CHART_LOOKBACK,
         )
+
+        # Add S/R levels overlay if enabled
+        if st.session_state.get("show_sr") and tf == "M1":
+            ChartRenderer.add_sr_levels(fig, window, row=1)
+
         st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
 
 
@@ -503,18 +597,29 @@ def _render_signals() -> None:
     # Build signals DataFrame
     signals_data = []
     for s in det.signals:
+        is_confluence = s.metadata.get("confluence", False)
+        conf_count = s.metadata.get("confluence_count", 1)
         signals_data.append({
             "Time": str(s.end_time)[:16],
             "Direction": s.metadata.get("direction", "?"),
             "Strategy": s.metadata.get("strategy", "?"),
+            "Confluence": f"✓ {conf_count}" if is_confluence else "—",
             "Confidence": f"{s.confidence:.2f}",
             "Details": ", ".join(f"{k}={v}" for k, v in s.metadata.items()
-                                if k not in ("strategy", "direction") and not k.startswith("candle")),
+                                if k not in ("strategy", "direction", "confluence", "confluence_count")
+                                and not k.startswith("candle")),
         })
 
     signals_df = pd.DataFrame(signals_data)
+
+    # Highlight confluence signals
+    def highlight_confluence(row):
+        if row.get("Confluence", "").startswith("✓"):
+            return ["background-color: #3fb95022"] * len(row)
+        return [""] * len(row)
+
     st.dataframe(
-        signals_df,
+        signals_df.style.apply(highlight_confluence, axis=1),
         use_container_width=True,
         height=min(300, 35 + len(signals_df) * 35),
     )
