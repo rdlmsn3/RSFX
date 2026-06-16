@@ -2,6 +2,8 @@
 
 Event-driven market replay with 72+ strategies, backtesting, correlation analysis, portfolio optimization, confluence trading, support/resistance detection, and a web UI.
 
+> **Unified Engine Architecture:** All UIs (Streamlit, CLI, FastAPI) now share a single `SignalEngine` + `TradeEngine` for consistent signal evaluation and trade execution. See [Core Engine](#core-engine) for details.
+
 ---
 
 ## Quick Start
@@ -29,8 +31,8 @@ python3 -m backtest correlation
 # Run portfolio optimizer
 python3 -m backtest portfolio
 
-# Run confluence backtester
-python3 -m backtest confluence -s tweezer_reversal,h1_trend_m5_rsi,cci_ema --lookback 5
+# Run CLI backtest (quick one-liner)
+python3 ui/cli.py -s h1_trend_m5_rsi,cci_ema --csv data/DAT_ASCII_EURUSD_M1_202605.csv
 
 # Run confluence web UI
 python3 -m backtest ui
@@ -84,33 +86,35 @@ RSFX/
 ├── backtest/                       # Backtest module (python3 -m backtest)
 │   ├── __init__.py
 │   ├── __main__.py                 # Unified entry point (subcommands)
-│   ├── backtester.py               # Parallel strategy backtester + tick-level exit scanner
-│   ├── engine.py                   # Shared trading primitives (TP/SL, equity, stats, filters)
 │   ├── correlation.py              # Strategy correlation analysis
 │   ├── portfolio.py                # Portfolio optimizer (brute-force)
-│   ├── confluence.py               # Signal-buffer confluence backtester (equity tracking)
 │   ├── buckets.py                  # Named strategy bucket system
-│   ├── trade_store.py              # SQLite persistence for trades (runs + trades tables)
 │   └── ui/
 │       ├── index.html              # Confluence web UI frontend
-│       └── server.py               # FastAPI backend (port 8502)
+│       └── server.py               # FastAPI backend (port 8502) → unified engine
 │
 ├── results/                        # Generated backtest outputs (gitignored)
 │   ├── bt_*.csv                    # Backtest results + trades
 │   ├── corr_*.csv                  # Correlation outputs
 │   ├── portfolio_*.csv             # Portfolio optimizer outputs
-│   ├── confluence_*.csv            # Confluence outputs
 │   ├── trades.db                   # SQLite database (all runs + trades)
 │   └── *_latest.csv                # Symlinks to most recent
 │
-├── core/
+├── core/                           # Unified engine (shared by all UIs)
+│   ├── engine.py                   # CandleArrays, TP/SL, equity curve, stats
+│   ├── trade_engine.py             # Unified bar/tick trade executor
+│   ├── signal_engine.py            # Strategy evaluation + confluence buffer
+│   ├── trade_store.py              # SQLite persistence (runs + trades)
 │   ├── data_loader.py              # Adapter-pattern loaders: CSV + Parquet (M1 + tick auto-detect)
 │   ├── tick_candle_builder.py      # Tick → M1 OHLCV aggregation (midprice)
 │   ├── market_data_store.py        # Multi-symbol, multi-timeframe store
 │   ├── playback_controller.py      # Replay cursor and tick publisher
 │   ├── event_bus.py                # Pub/Sub message broker
-│   ├── events.py                   # Event dataclasses
-│   └── trade_engine.py             # Trade simulation engine
+│   └── events.py                   # Event dataclasses
+│
+├── ui/
+│   ├── __init__.py
+│   └── cli.py                      # Thin CLI wrapper for backtest
 │
 ├── detectors/
 │   ├── pattern_detector.py         # Pattern detection (pluggable)
@@ -196,39 +200,32 @@ python3 -m backtest portfolio --top 30                 # show top 30
 
 **Output:** `results/portfolio_results.csv`, `results/portfolio_top50.csv`
 
-### 5. Confluence Backtester (`python3 -m backtest confluence`)
-Signal-buffer confluence — strategies fire independently, trades execute when N out of M agree within a candle window.
+### 5. CLI Backtester (`python3 ui/cli.py`)
+Thin CLI wrapper for quick backtesting from the command line.
 
 ```bash
-# 2-of-3 must agree within 5 candles
-python3 -m backtest confluence -s tweezer_reversal,h1_trend_m5_rsi,cci_ema --lookback 5
+# Basic usage
+python3 ui/cli.py -s tweezer_reversal,h1_trend_m5_rsi --csv data/DAT_ASCII_EURUSD_M1_202605.csv
 
-# 3-of-5 must agree
-python3 -m backtest confluence -s tweezer_reversal,h1_trend_m5_rsi,cci_ema,ema_ribbon_pullback,marubozu_trend --lookback 5 --threshold 3
+# With options
+python3 ui/cli.py -s h1_trend_m5_rsi --lookback 5 --threshold 2 --spread 0.5 --min-rr 1.0
 
-# With S/R-aware exits
-python3 -m backtest confluence -s tweezer_reversal,h1_trend_m5_rsi,cci_ema --lookback 5 --use-sr
+# Skip saving to SQLite
+python3 ui/cli.py -s cci_ema --no-save
 ```
 
-**How it works:**
-1. Each strategy evaluates independently at every candle
-2. When a strategy fires, its signal enters a buffer (active for N candles)
-3. If another strategy fires within that window and agrees → confluence trade
-4. TP/SL from the most recent (triggering) signal
+**Options:**
+- `-s / --strategies`: Comma-separated strategy names
+- `--csv`: Path to CSV or Parquet data file
+- `-l / --lookback`: Confluence lookback window (default: 5)
+- `-t / --threshold`: Min strategies agreeing (default: 2)
+- `--spread`: Round-trip spread in pips (default: 0.5)
+- `--min-rr`: Minimum risk:reward ratio (default: 1.0)
+- `--lot-size`: Lot size (default: 0.01)
+- `--balance`: Starting balance (default: 1000)
+- `--no-save`: Skip saving results to SQLite
 
-**Tick-level execution:**
-- Entry: first tick at/after signal candle → midprice `(bid+ask)/2`
-- Exit: vectorized scan over raw ticks for SL/TP hit
-- LONG exits use bid price, SHORT exits use ask price (proper spread modeling)
-- MAE/MFE calculated from tick-level excursion
-
-**Equity tracking:**
-- Starts with configurable balance (default $1,000)
-- Dollar PnL per trade: `pnl_pips × pip_value × lot_size × 100,000`
-- Bankruptcy stop: halts trading when balance ≤ $0
-- Tracks: peak balance, max drawdown %, final balance
-
-**Output:** `results/confluence_*.csv`
+**Output:** Prints summary table and optionally saves to `results/trades.db`.
 
 ### 6. Support/Resistance Detection (`detectors/support_resistance.py`)
 Pivot-based S/R with ATR-adaptive tolerance — auto-tunes for any pair.
@@ -356,15 +353,18 @@ Place in `detectors/strategies/` — auto-discovered by the registry.
 | EventBus | ✅ |
 | PlaybackController | ✅ |
 | PatternDetector (pluggable strategy) | ✅ |
-| TradeEngine | ✅ |
+| Unified TradeEngine (bar + tick) | ✅ |
+| Unified SignalEngine (confluence buffer) | ✅ |
+| CandleArrays, TP/SL, equity, stats (core/engine.py) | ✅ |
+| CLI backtester (ui/cli.py) | ✅ |
 | ChartRenderer (3 subplots) | ✅ |
 | Streamlit UI | ✅ |
+| FastAPI backend (backtest/ui/server.py) | ✅ |
 | MTF Strategy (H1 trend + M5 momentum + M1 entry) | ✅ |
 | Candlestick pattern recognition | ✅ (via TA-Lib) |
 | Backtester (parallel, pre-computed) | ✅ |
 | Strategy correlation analysis | ✅ |
 | Portfolio optimizer (brute-force) | ✅ |
-| Confluence backtester (signal-buffer) | ✅ |
 | Confluence web UI | ✅ |
 | Support/Resistance detection (ATR-adaptive) | ✅ |
 | S/R-aware TP/SL toggle | ✅ |
