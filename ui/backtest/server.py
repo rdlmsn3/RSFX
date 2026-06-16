@@ -94,7 +94,7 @@ class BacktestRequest(BaseModel):
     symbol: str = "USDJPY"
     use_sr: bool = False
     spread_pips: float = 0.5
-    min_rr: float = 1.0
+    min_rr: float = 0.0
 
 
 class SaveBucketRequest(BaseModel):

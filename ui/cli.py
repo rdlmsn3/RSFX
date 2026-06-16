@@ -44,8 +44,8 @@ def main():
                         help="Min strategies agreeing (default: 2)")
     parser.add_argument("--spread", type=float, default=0.5,
                         help="Round-trip spread in pips (default: 0.5)")
-    parser.add_argument("--min-rr", type=float, default=1.0,
-                        help="Minimum risk:reward ratio (default: 1.0)")
+    parser.add_argument("--min-rr", type=float, default=0.0,
+                        help="Minimum risk:reward ratio (default: 0.0 = no filter, like old backtester)")
     parser.add_argument("--lot-size", type=float, default=0.01)
     parser.add_argument("--balance", type=float, default=10000.0)
     parser.add_argument("--no-save", action="store_true",
