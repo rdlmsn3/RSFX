@@ -2,19 +2,17 @@
 RSFX Backtest Module — unified entry point.
 
 Usage:
-    python3 -m backtest backtest -s tweezer_reversal,h1_trend_m5_rsi
+    python3 -m backtest run -s tweezer_reversal,h1_trend_m5_rsi
     python3 -m backtest correlation
     python3 -m backtest portfolio
-    python3 -m backtest confluence -s tweezer_reversal,h1_trend_m5_rsi --lookback 5
     python3 -m backtest ui
 """
 import sys
 
 COMMANDS = {
-    "backtest":     "backtest.backtester:main",
+    "run":          "ui.cli:main",
     "correlation":  "backtest.correlation:main",
     "portfolio":    "backtest.portfolio:main",
-    "confluence":   "backtest.confluence:main",
     "ui":           "backtest.ui.server:main",
 }
 
@@ -23,17 +21,15 @@ RSFX Backtest Module
 ====================
 
 Commands:
-  backtest      Parallel strategy backtester (--use-sr for S/R-aware TP/SL)
+  run           Unified backtest (SignalEngine + TradeEngine)
   correlation   Strategy correlation analysis
   portfolio     Portfolio optimizer (2+3 strategy combos)
-  confluence    Signal-buffer confluence backtester
-  ui            Web UI for confluence backtester (port 8502)
+  ui            Web UI for backtester (port 8502)
 
 Examples:
-  python3 -m backtest backtest -s tweezer_reversal,h1_trend_m5_rsi --use-sr
+  python3 -m backtest run -s tweezer_reversal,h1_trend_m5_rsi --lookback 5
   python3 -m backtest correlation
   python3 -m backtest portfolio --max-combo 3
-  python3 -m backtest confluence -s tweezer_reversal,h1_trend_m5_rsi,cci_ema --lookback 5
   python3 -m backtest ui
 
 Each command accepts --help for detailed options.
