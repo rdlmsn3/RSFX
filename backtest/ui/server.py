@@ -1,11 +1,12 @@
 """
-confluence_ui/server.py
+backtest/ui/server.py
 -----------------------
-Minimal FastAPI backend for the confluence backtester UI.
+Minimal FastAPI backend for the backtester UI.
+Uses the unified SignalEngine + TradeEngine.
 
 Usage:
     cd /home/rudi/RSFX
-    python3 confluence_ui/server.py
+    python3 backtest/ui/server.py
 
 Then open http://localhost:8502
 """
@@ -25,16 +26,13 @@ from core.data_loader import HistDataAdapter, get_adapter
 from core.market_data_store import MarketDataStore
 from detectors.strategies.registry import STRATEGY_REGISTRY, _populate_registry
 
-app = FastAPI(title="RSFX Confluence Backtester")
+app = FastAPI(title="RSFX Backtester")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 
 # Cache: csv_path -> (MarketDataStore, candle_count, date_range, raw_ticks)
 _store_cache: dict[str, tuple[MarketDataStore, int, str, pd.DataFrame | None]] = {}
-
-# Current running engine (for progress polling)
-_current_engine = None
 
 
 def get_store(csv_path: str, symbol: str) -> tuple[MarketDataStore, int, pd.DataFrame | None]:
@@ -131,88 +129,98 @@ async def run_backtest(req: BacktestRequest):
         return {"error": f"Threshold {req.threshold} exceeds strategy count {len(req.strategies)}"}
 
     try:
+        from core.trade_engine import TradeConfig, TradeEngine
+        from core.signal_engine import SignalEngine
+        from backtest.backtester import CandleArrays
+        from core.events import BarEvent
+
         store, n_candles, raw_ticks = get_store(req.csv_file, req.symbol)
 
-        from backtest.confluence import ConfluenceEngine
+        # Build arrays
+        m1_df = store.get_data(req.symbol, "M1")
+        arrays = CandleArrays.from_dataframe(m1_df)
+        tf_arrays = {}
+        for tf in store.available_timeframes(req.symbol):
+            if tf == "M1":
+                continue
+            try:
+                tf_arrays[tf] = CandleArrays.from_dataframe(store.get_data(req.symbol, tf))
+            except Exception:
+                pass
 
-        engine = ConfluenceEngine(
-            data_store=store,
-            strategy_names=req.strategies,
+        # Create engines
+        config = TradeConfig(
             symbol=req.symbol,
-            lookback=req.lookback,
-            threshold=req.threshold,
-            use_sr=req.use_sr,
-            ticks=raw_ticks,
+            pip_value=0.01,
+            lot_size=0.01,
+            initial_balance=10000.0,
             spread_pips=req.spread_pips,
             min_rr=req.min_rr,
+            use_sr=req.use_sr,
         )
+        signal_engine = SignalEngine(
+            strategy_names=req.strategies,
+            lookback=req.lookback,
+            threshold=req.threshold,
+        )
+        trade_engine = TradeEngine(config)
 
+        # Pre-compute indicators
+        signal_engine.precompute(arrays, tf_arrays)
+
+        # Run the backtest loop
         t0 = time.perf_counter()
-        global _current_engine
-        _current_engine = engine
-        try:
-            trades = engine.run()
-        finally:
-            _current_engine = None
+        max_start = max(req.lookback, 100)
+        for i in range(max_start, arrays.n):
+            signals = signal_engine.evaluate(i, arrays, tf_arrays)
+            for sig in signals:
+                trade_engine.open(sig)
+            bar_event = BarEvent(
+                timestamp=arrays.timestamps[i],
+                open=float(arrays.opens[i]),
+                high=float(arrays.highs[i]),
+                low=float(arrays.lows[i]),
+                close=float(arrays.closes[i]),
+                volume=float(arrays.volumes[i]),
+                symbol=req.symbol,
+            )
+            trade_engine.on_bar(bar_event)
+
+        # Force close any remaining open position
+        if trade_engine.open_position:
+            trade_engine.force_close(
+                float(arrays.closes[arrays.n - 1]),
+                pd.Timestamp(arrays.timestamps[arrays.n - 1]),
+                "EOD",
+            )
         elapsed = round(time.perf_counter() - t0, 1)
 
-        total = len(trades)
+        trades = trade_engine.trades
+
+        # Use unified get_stats() from TradeEngine
+        result = trade_engine.get_stats()
+        # Add extra stats the UI expects
+        result["n_candles"] = n_candles
+        result["spread_pips"] = req.spread_pips
+        result["min_rr"] = req.min_rr
+        result["elapsed_sec"] = elapsed
+
+        # Extended stats not in get_stats()
+        import statistics
         winning = [t for t in trades if t.pnl_pips > 0]
         losing = [t for t in trades if t.pnl_pips <= 0]
-        total_pnl = sum(t.pnl_pips for t in trades)
-        gross_profit = sum(t.pnl_pips for t in winning)
-        gross_loss = abs(sum(t.pnl_pips for t in losing))
-        win_rate = len(winning) / total * 100 if total else 0
-        pf = gross_profit / gross_loss if gross_loss > 0 else float("inf")
-        avg_win = gross_profit / len(winning) if winning else 0
-        avg_loss = gross_loss / len(losing) if losing else 0
-        expectancy = (win_rate / 100) * avg_win - (1 - win_rate / 100) * avg_loss
-
-        # Extended stats
-        import statistics
         win_pips = [t.pnl_pips for t in winning]
         lose_pips = [abs(t.pnl_pips) for t in losing]
         durations = [t.bars_held for t in trades]
 
-        result = {
-            "total_trades": total,
-            "winning_trades": len(winning),
-            "losing_trades": len(losing),
-            "win_rate": round(win_rate, 1),
-            "total_pnl_pips": round(total_pnl, 1),
-            "avg_pnl_pips": round(total_pnl / total, 1) if total else 0,
-            "expectancy_pips": round(expectancy, 1),
-            "profit_factor": round(pf, 2),
-            "n_candles": n_candles,
-            # Extended
-            "avg_win_pips": round(statistics.mean(win_pips), 2) if win_pips else 0,
-            "avg_loss_pips": round(statistics.mean(lose_pips), 2) if lose_pips else 0,
-            "median_win_pips": round(statistics.median(win_pips), 2) if win_pips else 0,
-            "median_loss_pips": round(statistics.median(lose_pips), 2) if lose_pips else 0,
-            "avg_bars_held": round(statistics.mean(durations), 1) if durations else 0,
-            "spread_pips": req.spread_pips,
-            "min_rr": req.min_rr,
-            # Equity
-            **engine._equity_stats,
-        }
+        result["avg_win_pips"] = round(statistics.mean(win_pips), 2) if win_pips else 0
+        result["avg_loss_pips"] = round(statistics.mean(lose_pips), 2) if lose_pips else 0
+        result["median_win_pips"] = round(statistics.median(win_pips), 2) if win_pips else 0
+        result["median_loss_pips"] = round(statistics.median(lose_pips), 2) if lose_pips else 0
+        result["avg_bars_held"] = round(statistics.mean(durations), 1) if durations else 0
 
-        trade_list = []
-        for t in trades:
-            trade_list.append({
-                "entry_time": str(t.entry_time),
-                "direction": t.direction,
-                "entry_price": t.entry_price,
-                "take_profit": t.take_profit,
-                "stop_loss": t.stop_loss,
-                "exit_price": t.exit_price,
-                "exit_time": str(t.exit_time),
-                "exit_reason": t.exit_reason,
-                "pnl_pips": t.pnl_pips,
-                "mae_pips": t.mae_pips,
-                "mfe_pips": t.mfe_pips,
-                "bars_held": t.bars_held,
-                "strategies": t.strategy,
-            })
+        # Build trade list using TradeRecord.to_dict()
+        trade_list = [t.to_dict() for t in trades]
 
         return {
             "result": result,
@@ -236,10 +244,8 @@ async def run_backtest(req: BacktestRequest):
 @app.get("/progress")
 async def get_progress():
     """Return current backtest progress (polled by frontend during run)."""
-    if _current_engine is None:
-        return {"running": False, "pct": 100}
-    p = _current_engine._progress
-    return {"running": True, **p}
+    # Simplified: no real-time progress tracking yet
+    return {"running": False, "pct": 100}
 
 
 @app.get("/buckets")
@@ -298,7 +304,7 @@ async def load_bucket(name: str):
 
 def main():
     import uvicorn
-    print("Starting RSFX Confluence UI on http://localhost:8502")
+    print("Starting RSFX Backtester UI on http://localhost:8502")
     uvicorn.run(app, host="0.0.0.0", port=8502)
 
 
