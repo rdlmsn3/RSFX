@@ -72,6 +72,40 @@ class TradeEvent:
 
 
 @dataclass
+class SignalEvent:
+    """
+    Published by a strategy when it fires a trading signal.
+
+    Carries the full signal payload needed by TradeEngine to open/close positions.
+    """
+    strategy_name: str
+    direction: str                            # "LONG" | "SHORT"
+    entry_price: float
+    take_profit: float
+    stop_loss: float
+    timestamp: pd.Timestamp
+    confidence: float = 1.0
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class BarEvent:
+    """
+    Published on every M1 bar by the bar aggregator / replay controller.
+
+    Contains full OHLCV data for the bar.
+    """
+    timestamp: pd.Timestamp
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float = 0.0
+    symbol: str = "USDJPY"
+    timeframe: str = "M1"
+
+
+@dataclass
 class SystemEvent:
     """
     Internal system-level events (load, reset, error).
