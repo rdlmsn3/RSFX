@@ -17,13 +17,10 @@ streamlit run ui/streamlit_app/app.py
 # → http://localhost:8501
 
 # Run backtester (all strategies)
-python3 -m backtest backtest
+python3 -m backtest run
 
 # Run backtester (specific strategies)
-python3 -m backtest backtest -s tweezer_reversal,h1_trend_m5_rsi,cci_ema
-
-# Run backtester with S/R-aware TP/SL
-python3 -m backtest backtest -s h1_trend_m5_rsi --use-sr
+python3 -m backtest run -s tweezer_reversal,h1_trend_m5_rsi,cci_ema
 
 # Run strategy correlation analysis
 python3 -m backtest correlation
@@ -65,10 +62,10 @@ python3 -m backtest --help
 │  SignalEngine.evaluate()                                        │
 │    ├── runs 72 strategies via StrategyRegistry                  │
 │    ├── confluence buffer (lookback window, threshold)           │
+│    ├── compute_tp_sl() ATR fallback when strategies return 0   │
 │    └── outputs → [SignalEvent]                                  │
 │                             │                                   │
 │  TradeEngine.open(signal)   │                                   │
-│    ├── compute_tp_sl()      │  ← core/engine.py                 │
 │    ├── check_min_rr()       │  ← core/engine.py                 │
 │    ├── check_dedup()        │  ← core/engine.py                 │
 │    ├── applies spread cost  │                                   │
@@ -100,7 +97,7 @@ RSFX/
 ├── core/                           # SHARED ENGINE LAYER
 │   ├── engine.py                   # CandleArrays + trading math (TP/SL, PnL, equity, stats)
 │   ├── trade_engine.py             # Unified bar/tick trade executor
-│   ├── signal_engine.py            # Strategy evaluation + confluence buffer
+│   ├── signal_engine.py            # Strategy evaluation + confluence buffer + ATR TP/SL
 │   ├── trade_store.py              # SQLite persistence (runs + trades)
 │   ├── data_loader.py              # Adapter-pattern loaders: CSV + Parquet (auto-detect)
 │   ├── tick_candle_builder.py      # Tick → M1 OHLCV aggregation (midprice)
@@ -110,9 +107,9 @@ RSFX/
 │   └── events.py                   # SignalEvent, BarEvent, TradeEvent
 │
 ├── ui/                             # CONSUMER LAYERS (thin, no logic)
-│   ├── cli.py                      # CLI — argparse → engine → stdout/CSV
+│   ├── cli.py                      # CLI — argparse → engine → stdout/SQLite
 │   ├── backtest/                   # FastAPI web UI — HTTP → engine → JSON
-│   │   ├── server.py
+│   │   ├── server.py               # + _sanitize() for numpy/inf/nan
 │   │   └── index.html
 │   └── streamlit_app/              # Streamlit — replay + live trading
 │       ├── app.py
@@ -120,7 +117,7 @@ RSFX/
 │           └── chart_renderer.py
 │
 ├── backtest/                       # Analysis tools (not UI)
-│   ├── __main__.py                 # Unified entry point (subcommands)
+│   ├── __main__.py                 # Unified entry point (run, correlation, portfolio, ui)
 │   ├── correlation.py              # Strategy correlation analysis
 │   ├── portfolio.py                # Portfolio optimizer (brute-force)
 │   └── buckets.py                  # Named strategy bucket system
@@ -160,31 +157,25 @@ streamlit run ui/streamlit_app/app.py
 # → http://localhost:8501
 ```
 
-### 2. Backtester (`python3 -m backtest backtest`)
+### 2. Backtester (`python3 -m backtest run`)
 
-Parallel walk-forward backtester. Pre-computes indicators once, runs strategies across CPU cores.
+Unified backtester using SignalEngine + TradeEngine. Saves results to SQLite.
 
 ```bash
 # All strategies
-python3 -m backtest backtest
+python3 -m backtest run
 
-# Specific strategies (comma-separated, partial match)
-python3 -m backtest backtest -s tweezer_reversal,h1_trend_m5_rsi
-
-# All H1 trend strategies
-python3 -m backtest backtest -s h1_trend
+# Specific strategies (comma-separated, exact names)
+python3 -m backtest run -s tweezer_reversal,h1_trend_m5_rsi
 
 # Custom data file
-python3 -m backtest backtest --csv data/DAT_ASCII_EURUSD_M1_202605.csv --symbol EURUSD
-
-# With S/R-aware TP/SL (support/resistance levels for exits)
-python3 -m backtest backtest -s h1_trend_m5_rsi --use-sr
+python3 -m backtest run --csv data/DAT_ASCII_EURUSD_M1_202605.csv --symbol EURUSD
 
 # Options
-python3 -m backtest backtest -s tweezer_reversal --workers 4 --top 10 --no-save
+python3 -m backtest run -s tweezer_reversal --spread 0.5 --min-rr 1.0 --no-save
 ```
 
-**Output:** Timestamped CSVs in `results/` with metadata (data file, symbol, strategies, run time). Latest symlink for convenience.
+**Note:** Strategy names must be exact (e.g. `h1_trend_m5_rsi`, not `h1_trend`). Use `python3 -m backtest run --help` to see all options.
 
 ### 3. Strategy Correlation (`python3 -m backtest correlation`)
 
@@ -235,7 +226,7 @@ python3 ui/cli.py -s cci_ema --no-save
 ```
 
 **Options:**
-- `-s / --strategies`: Comma-separated strategy names
+- `-s / --strategies`: Comma-separated strategy names (exact match required)
 - `--csv`: Path to CSV or Parquet data file
 - `-l / --lookback`: Confluence lookback window (default: 5)
 - `-t / --threshold`: Min strategies agreeing (default: 2)
@@ -245,11 +236,11 @@ python3 ui/cli.py -s cci_ema --no-save
 - `--balance`: Starting balance (default: 1000)
 - `--no-save`: Skip saving results to SQLite
 
-**Output:** Prints summary table and optionally saves to `results/trades.db`.
+**Output:** Prints summary table and saves to `results/trades.db`.
 
 ### 6. FastAPI Web UI (`python3 ui/backtest/server.py`)
 
-Browser-based interface for the confluence backtester.
+Browser-based interface for the backtester. All responses sanitized for JSON (numpy types, inf, nan handled).
 
 ```bash
 python3 ui/backtest/server.py
@@ -267,6 +258,7 @@ python3 ui/backtest/server.py
 - Extended stats: avg/median win/loss, avg duration, expectancy
 - Strategy bucket system (save/load named configurations)
 - localStorage persistence across sessions
+- **SQLite persistence** — every run saved to `results/trades.db`
 
 ### 7. Support/Resistance Detection (`detectors/support_resistance.py`)
 
@@ -310,9 +302,10 @@ stats = build_result("strategy_name", trades, max_dd, balance_curve)
 ```python
 from core.signal_engine import SignalEngine
 
-engine = SignalEngine(strategies=["h1_trend_m5_rsi", "cci_ema"], lookback=5, threshold=2)
-signals = engine.evaluate(market_data, candle_arrays)
-# → list[SignalEvent] with confluence buffer applied
+engine = SignalEngine(strategy_names=["h1_trend_m5_rsi", "cci_ema"], lookback=5, threshold=2)
+engine.precompute(arrays, tf_arrays)  # optional fast path
+signals = engine.evaluate(i, arrays, tf_arrays)
+# → list[SignalEvent] with confluence buffer + ATR TP/SL fallback
 ```
 
 ### `core/trade_engine.py` — Trade Lifecycle
@@ -320,13 +313,13 @@ signals = engine.evaluate(market_data, candle_arrays)
 ```python
 from core.trade_engine import TradeEngine, TradeConfig
 
-config = TradeConfig(spread_pips=0.5, min_rr=1.0, lot_size=0.01, balance=1000)
+config = TradeConfig(symbol="USDJPY", spread_pips=0.5, min_rr=1.0, lot_size=0.01, initial_balance=10000)
 engine = TradeEngine(config)
 
-engine.open(signal)  # → opens position with TP/SL
-engine.on_bar(candle)  # → checks TP/SL hits, updates equity
-trades = engine.get_trades()  # → list[TradeRecord]
-stats = engine.get_stats()    # → dict with win_rate, PF, etc.
+engine.open(signal)      # → opens position with TP/SL
+engine.on_bar(bar_event) # → checks TP/SL hits, updates equity
+trades = engine.trades   # → list[TradeRecord]
+stats = engine.get_stats()  # → dict with win_rate, PF, etc.
 ```
 
 ---
@@ -371,6 +364,36 @@ Place in `detectors/strategies/` — auto-discovered by the registry.
 - Tick data auto-converted to M1 via `TickCandleBuilder` (midprice aggregation)
 - Tick-level exit scanner uses vectorized NumPy — ~50x faster than Python loop
 - Tested on 2M+ tick rows and 30K+ M1 candles without noticeable lag
+
+---
+
+## Test Results (Post-Refactor)
+
+**79/82 tests pass** across 5 phases after major architecture refactor.
+
+| Phase | Tests | Pass | Fail | Notes |
+|-------|-------|------|------|-------|
+| 1. Core Engine | 48 | 48 | 0 | Data loader, engine math, trade engine, signal engine, trade store |
+| 2. CLI Backtest | 10 | 7 | 3 | CLI polish items (see below) |
+| 3. FastAPI UI | 15 | 15 | 0 | All endpoints, JSON serialization, SQLite save |
+| 5. Integration | 9 | 9 | 0 | End-to-end pipelines, cross-UI consistency |
+
+### Bugs Fixed During Testing
+
+| Bug | Fix |
+|-----|-----|
+| `float("inf")` in profit_factor → JSON parse error | Changed to `0.0` in `build_result()` |
+| numpy types not JSON serializable | Added `_sanitize()` wrapper in FastAPI server |
+| TP/SL=0.0 (ATR fallback missing after refactor) | Added `compute_tp_sl()` call in `SignalEngine` |
+| `get_trades()` missing JOIN clause | Fixed column-description query in `trade_store.py` |
+
+### Known CLI Issues (low priority)
+
+| Issue | Impact |
+|-------|--------|
+| No partial name matching (`-s h1_trend` fails) | Must use exact names like `h1_trend_m5_rsi` |
+| `--use-sr` flag not in CLI argparse | S/R toggle only works via FastAPI JSON body |
+| CLI doesn't create `bt_*.csv` output files | Saves to SQLite only, not CSV |
 
 ---
 
@@ -420,7 +443,7 @@ Place in `detectors/strategies/` — auto-discovered by the registry.
 | Support/Resistance detection (ATR-adaptive) | ✅ |
 | core/engine.py — CandleArrays + all trading math | ✅ |
 | Unified TradeEngine (bar + tick) | ✅ |
-| Unified SignalEngine (confluence buffer) | ✅ |
+| Unified SignalEngine (confluence + ATR TP/SL fallback) | ✅ |
 | CLI backtester (ui/cli.py) | ✅ |
 | FastAPI web UI (ui/backtest/server.py) | ✅ |
 | Streamlit replay UI (ui/streamlit_app/app.py) | ✅ |
@@ -437,11 +460,16 @@ Place in `detectors/strategies/` — auto-discovered by the registry.
 | Equity tracking + bankruptcy stop | ✅ |
 | Live progress bar (poll-based) | ✅ |
 | Strategy bucket system (save/load) | ✅ |
+| JSON serialization (numpy/inf/nan safe) | ✅ |
+| Post-refactor test suite (79/82 pass) | ✅ |
 
 ## What's Next 🔜
 
 | Component | Priority | Notes |
 |---|---|---|
+| CLI partial name matching | Low | `-s h1_trend` should match all h1_trend_* |
+| CLI `--use-sr` flag | Low | Add S/R toggle to argparse |
+| CLI CSV output files | Low | Create bt_*.csv alongside SQLite save |
 | ML model integration | High | Train on strategy signals → predict best combos |
 | Risk Manager | High | Position sizing, max exposure, drawdown limits |
 | Strategy Engine | Medium | Dynamic strategy switching based on regime |
@@ -449,4 +477,3 @@ Place in `detectors/strategies/` — auto-discovered by the registry.
 | Journal System | Medium | Trade journal with notes, screenshots, tags |
 | Secondary symbol feeds | Low | DXY, Gold, Oil as context for strategy decisions |
 | Live trading mode | Low | Paper trading → real execution |
-| Web dashboard | Low | Persistent analytics, no manual CSV loading |

@@ -1,0 +1,14 @@
+{
+  "name": "test_phase3",
+  "strategies": [
+    "tweezer_reversal",
+    "cci_ema"
+  ],
+  "use_sr": false,
+  "lookback": 5,
+  "threshold": 2,
+  "csv_file": "DAT_ASCII_USDJPY_M1_202605.csv",
+  "symbol": "USDJPY",
+  "description": "",
+  "created": ""
+}

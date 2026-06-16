@@ -258,6 +258,6 @@ def get_trades(
 
     rows = conn.execute(query, params).fetchall()
     cols = [d[0] for d in conn.execute(
-        "SELECT t.*, r.timestamp AS run_time FROM trades t LIMIT 0"
+        "SELECT t.*, r.timestamp AS run_time FROM trades t JOIN runs r ON t.run_id = r.id LIMIT 0"
     ).description]
     return [dict(zip(cols, r)) for r in rows]
