@@ -199,6 +199,9 @@ async def run_backtest(req: BacktestRequest):
 
         # Use unified get_stats() from TradeEngine
         result = trade_engine.get_stats()
+        # Strip non-serializable fields — frontend gets trades/balance separately
+        result.pop("trades", None)
+        result.pop("balance_curve", None)
         # Add extra stats the UI expects
         result["n_candles"] = n_candles
         result["spread_pips"] = req.spread_pips
@@ -222,10 +225,29 @@ async def run_backtest(req: BacktestRequest):
         # Build trade list using TradeRecord.to_dict()
         trade_list = [t.to_dict() for t in trades]
 
+        # Save to SQLite
+        run_id = None
+        try:
+            from core.trade_store import init_db, save_trades
+            db = init_db("results/trades.db")
+            run_meta = {
+                "data_file": req.csv_file,
+                "symbol": req.symbol,
+                "strategies": req.strategies,
+                "lookback": req.lookback,
+                "threshold": req.threshold,
+                "n_strategies": len(req.strategies),
+            }
+            run_id = save_trades(db, trades, run_meta, result)
+            db.close()
+        except Exception as save_err:
+            print(f"Warning: failed to save to SQLite: {save_err}")
+
         return {
             "result": result,
             "trades": trade_list,
             "elapsed": elapsed,
+            "run_id": run_id,
             "config": {
                 "strategies": req.strategies,
                 "lookback": req.lookback,
