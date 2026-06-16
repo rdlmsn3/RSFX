@@ -45,9 +45,9 @@ python3 -m backtest --help
 ## Architecture
 
 ```
-CSV Data Source (M1 bars or tick data)
+Data Source (CSV / Parquet — M1 bars or tick data)
       ↓
-DataAdapter (HistDataAdapter — auto-detects M1 vs tick format)
+get_adapter() factory → HistDataAdapter or ParquetAdapter (auto-detects format)
       ├── M1 bars → MarketDataStore
       └── Tick data → TickCandleBuilder → M1 bars + raw ticks → MarketDataStore
       ↓
@@ -85,10 +85,12 @@ RSFX/
 │   ├── __init__.py
 │   ├── __main__.py                 # Unified entry point (subcommands)
 │   ├── backtester.py               # Parallel strategy backtester + tick-level exit scanner
+│   ├── engine.py                   # Shared trading primitives (TP/SL, equity, stats, filters)
 │   ├── correlation.py              # Strategy correlation analysis
 │   ├── portfolio.py                # Portfolio optimizer (brute-force)
 │   ├── confluence.py               # Signal-buffer confluence backtester (equity tracking)
 │   ├── buckets.py                  # Named strategy bucket system
+│   ├── trade_store.py              # SQLite persistence for trades (runs + trades tables)
 │   └── ui/
 │       ├── index.html              # Confluence web UI frontend
 │       └── server.py               # FastAPI backend (port 8502)
@@ -98,10 +100,11 @@ RSFX/
 │   ├── corr_*.csv                  # Correlation outputs
 │   ├── portfolio_*.csv             # Portfolio optimizer outputs
 │   ├── confluence_*.csv            # Confluence outputs
+│   ├── trades.db                   # SQLite database (all runs + trades)
 │   └── *_latest.csv                # Symlinks to most recent
 │
 ├── core/
-│   ├── data_loader.py              # Adapter-pattern CSV loaders (M1 + tick auto-detect)
+│   ├── data_loader.py              # Adapter-pattern loaders: CSV + Parquet (M1 + tick auto-detect)
 │   ├── tick_candle_builder.py      # Tick → M1 OHLCV aggregation (midprice)
 │   ├── market_data_store.py        # Multi-symbol, multi-timeframe store
 │   ├── playback_controller.py      # Replay cursor and tick publisher
@@ -123,7 +126,7 @@ RSFX/
 ├── buckets/                        # Saved strategy buckets (JSON)
 │
 └── data/
-    └── *.csv                       # HistData.com format data files (M1 + tick)
+    └── *.csv / *.parquet           # HistData.com CSV + Parquet data files (M1 + tick)
 ```
 
 ---
@@ -345,7 +348,9 @@ Place in `detectors/strategies/` — auto-discovered by the registry.
 
 | Component | Status |
 |---|---|
-| Data Loader (HistData) | ✅ |
+| Data Loader (CSV + Parquet) | ✅ |
+| Parquet support (auto-detect bar vs tick) | ✅ |
+| SQLite trade persistence (runs + trades) | ✅ |
 | Tick data support (auto-detect + M1 conversion) | ✅ |
 | MarketDataStore (M1/M5/H1/D1) | ✅ |
 | EventBus | ✅ |

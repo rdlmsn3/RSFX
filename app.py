@@ -33,7 +33,7 @@ from pathlib import Path
 import streamlit as st
 import pandas as pd
 
-from core.data_loader import HistDataAdapter
+from core.data_loader import HistDataAdapter, get_adapter
 from core.market_data_store import MarketDataStore
 from core.event_bus import EventBus
 from core.playback_controller import PlaybackController
@@ -195,7 +195,7 @@ def _load_data(csv_path: str, symbol: str) -> bool:
     """
     with st.spinner(f"Loading {csv_path} …"):
         try:
-            adapter = HistDataAdapter()
+            adapter = get_adapter(csv_path)
             m1_df   = adapter.load(csv_path)
 
             store   = MarketDataStore()

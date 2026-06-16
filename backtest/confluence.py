@@ -32,7 +32,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.data_loader import HistDataAdapter, TickDataAdapter
+from core.data_loader import HistDataAdapter, TickDataAdapter, get_adapter
 from core.market_data_store import MarketDataStore
 from detectors.strategies.registry import STRATEGY_REGISTRY, _populate_registry
 from detectors.strategies.base import BaseStrategy
@@ -46,7 +46,10 @@ from backtest.backtester import (
     Trade,
     find_exit,
     find_exit_ticks,
-    _build_result,
+)
+from backtest.engine import (
+    compute_tp_sl, compute_pnl, build_result, update_equity,
+    check_dedup, apply_spread, check_min_rr,
 )
 
 
@@ -293,86 +296,6 @@ class ConfluenceEngine:
             logger.debug("%s evaluate error at i=%d: %s", name, i, exc)
             return []
 
-    def _compute_tp_sl(
-        self,
-        signal: PatternSignal,
-        i: int,
-    ) -> tuple[float, float]:
-        """Get TP/SL from signal, with ATR fallback. S/R override if enabled."""
-        tp = signal.metadata.get("take_profit", 0.0)
-        sl = signal.metadata.get("stop_loss", 0.0)
-        direction = signal.metadata.get("direction", "")
-
-        if tp and sl:
-            entry = float(self._arrays.closes[i])
-            # Sanity: ensure correct direction
-            if direction == "LONG":
-                if tp <= entry:
-                    tp = entry + abs(tp - entry)
-                if sl >= entry:
-                    sl = entry - abs(sl - entry)
-            else:
-                if tp >= entry:
-                    tp = entry - abs(tp - entry)
-                if sl <= entry:
-                    sl = entry + abs(sl - entry)
-
-            # S/R override if enabled
-            if self._use_sr:
-                try:
-                    from detectors.support_resistance import SupportResistance
-                    win_start = max(0, i - self._max_lookback)
-                    _sr_df = pd.DataFrame(
-                        {"open":  self._arrays.opens[win_start:i+1],
-                         "high":  self._arrays.highs[win_start:i+1],
-                         "low":   self._arrays.lows[win_start:i+1],
-                         "close": self._arrays.closes[win_start:i+1]},
-                    )
-                    sr = SupportResistance(_sr_df, pip_tolerance=0.10, min_touches=2)
-                    atr_sl = abs(entry - sl)
-                    sr_tp, sr_sl = sr.get_tp_sl(entry, direction, atr_sl)
-                    if sr_tp and sr_sl:
-                        tp, sl = sr_tp, sr_sl
-                except Exception:
-                    pass
-
-            return tp, sl
-
-        # ATR fallback
-        win_start = max(0, i - self._max_lookback)
-        _df = pd.DataFrame(
-            {"high": self._arrays.highs[win_start:i+1],
-             "low":  self._arrays.lows[win_start:i+1],
-             "close": self._arrays.closes[win_start:i+1]},
-        )
-        try:
-            BaseStrategy.compute_tp_sl(signal, _df)
-            tp = signal.metadata.get("take_profit", 0.0)
-            sl = signal.metadata.get("stop_loss", 0.0)
-
-            # S/R override on ATR fallback too
-            if self._use_sr and tp and sl:
-                try:
-                    from detectors.support_resistance import SupportResistance
-                    _sr_df = pd.DataFrame(
-                        {"open":  self._arrays.opens[win_start:i+1],
-                         "high":  self._arrays.highs[win_start:i+1],
-                         "low":   self._arrays.lows[win_start:i+1],
-                         "close": self._arrays.closes[win_start:i+1]},
-                    )
-                    sr = SupportResistance(_sr_df, pip_tolerance=0.10, min_touches=2)
-                    entry = float(self._arrays.closes[i])
-                    atr_sl = abs(entry - sl)
-                    sr_tp, sr_sl = sr.get_tp_sl(entry, direction, atr_sl)
-                    if sr_tp and sr_sl:
-                        tp, sl = sr_tp, sr_sl
-                except Exception:
-                    pass
-
-            return tp, sl
-        except Exception:
-            return 0.0, 0.0
-
     def run(self) -> list[Trade]:
         """Run the signal-buffer confluence backtest."""
         print(f"\nPre-computing indicators for {len(self._strategies)} strategies...")
@@ -403,7 +326,6 @@ class ConfluenceEngine:
         last_entry_price: Optional[float] = None
         bankrupt = False
 
-        _dedup_tol = 1e-6
         n_signals_total = 0
         n_confluences = 0
         confluence_log: list[dict] = []
@@ -429,19 +351,11 @@ class ConfluenceEngine:
 
             # 2. Skip if trade is open
             if open_trade is not None:
-                ep = open_trade.entry_price
-                close = float(self._arrays.closes[i])
-                unreal = (
-                    (close - ep) if open_trade.direction == "LONG"
-                    else (ep - close)
-                ) / self._pip_value
-                bal = self._initial_balance + (
-                    realized_pnl_pips + unreal
-                ) * self._lot_size * 100
-                balance_curve.append(bal)
-                peak_balance = max(peak_balance, bal)
-                max_dd = max(
-                    max_dd, (peak_balance - bal) / peak_balance * 100
+                balance_curve, peak_balance, max_dd = update_equity(
+                    open_trade.entry_price, open_trade.direction,
+                    float(self._arrays.closes[i]), realized_pnl_pips,
+                    self._pip_value, self._initial_balance, self._lot_size,
+                    balance_curve, peak_balance, max_dd,
                 )
                 continue
 
@@ -462,7 +376,7 @@ class ConfluenceEngine:
                 entry_price = sig.metadata.get(
                     "entry_price", float(self._arrays.closes[i])
                 )
-                tp, sl = self._compute_tp_sl(sig, i)
+                tp, sl = compute_tp_sl(sig, self._arrays, i, self._max_lookback, self._use_sr)
 
                 # 4. Add to buffer and check for confluence
                 result = buffer.add_and_check(
@@ -508,8 +422,7 @@ class ConfluenceEngine:
                     trade_entry = float(self._arrays.closes[i])
 
                 # Dedup
-                if (last_entry_price is not None and
-                        abs(last_entry_price - trade_entry) < _dedup_tol):
+                if check_dedup(last_entry_price, trade_entry):
                     continue
 
                 if not (trade_tp and trade_sl):
@@ -522,8 +435,7 @@ class ConfluenceEngine:
                     continue
 
                 # --- Minimum R:R filter ---
-                rr_ratio = reward / risk if risk > 0 else 0.0
-                if rr_ratio < self._min_rr:
+                if not check_min_rr(trade_entry, trade_tp, trade_sl, self._pip_value, self._min_rr):
                     continue
 
                 # --- Tick-level or M1-level exit ---
@@ -540,13 +452,10 @@ class ConfluenceEngine:
                     )
                 exit_ts = pd.Timestamp(self._arrays.timestamps[exit_idx])
 
-                if conf_direction == "LONG":
-                    pnl = (exit_price - trade_entry) / self._pip_value
-                else:
-                    pnl = (trade_entry - exit_price) / self._pip_value
+                pnl = compute_pnl(conf_direction, trade_entry, exit_price, self._pip_value)
 
                 # --- Spread cost (round-trip) ---
-                pnl -= self._spread_pips
+                pnl = apply_spread(pnl, self._spread_pips)
 
                 # Calculate ages of agreeing signals
                 ages = {s.strategy_name: i - s.candle_idx for s in agreeing_signals}
@@ -595,21 +504,12 @@ class ConfluenceEngine:
                 break
 
             # 6. Equity curve
-            close = float(self._arrays.closes[i])
-            unreal = 0.0
-            if open_trade is not None:
-                ep = open_trade.entry_price
-                unreal = (
-                    (close - ep) if open_trade.direction == "LONG"
-                    else (ep - close)
-                ) / self._pip_value
-            bal = self._initial_balance + (
-                realized_pnl_pips + unreal
-            ) * self._lot_size * 100
-            balance_curve.append(bal)
-            peak_balance = max(peak_balance, bal)
-            max_dd = max(
-                max_dd, (peak_balance - bal) / peak_balance * 100
+            balance_curve, peak_balance, max_dd = update_equity(
+                open_trade.entry_price if open_trade else None,
+                open_trade.direction if open_trade else "",
+                float(self._arrays.closes[i]), realized_pnl_pips,
+                self._pip_value, self._initial_balance, self._lot_size,
+                balance_curve, peak_balance, max_dd,
             )
 
             # Progress
@@ -719,7 +619,7 @@ class ConfluenceEngine:
 
 def _print_results(trades: list[Trade]) -> dict:
     """Print and return results dict."""
-    result = _build_result("CONFLUENCE", trades, 0.0, [])
+    result = build_result("CONFLUENCE", trades, 0.0, [])
 
     print(f"\n{'='*80}")
     print(f"CONFLUENCE BACKTEST RESULTS (Signal-Buffer)")
@@ -814,6 +714,25 @@ def _save_results(
         if latest.is_symlink() or latest.exists():
             latest.unlink()
         latest.symlink_to(actual.name)
+
+    # ---- SQLite persistence -------------------------------------------
+    try:
+        from backtest.trade_store import init_db, save_trades
+        db_path = base / "trades.db"
+        conn = init_db(db_path)
+        run_meta = {
+            "data_file": data_file,
+            "symbol": symbol,
+            "strategies": strategies,
+            "lookback": lookback,
+            "threshold": threshold,
+            "n_strategies": len(strategies),
+        }
+        run_id = save_trades(conn, trades, run_meta, result)
+        conn.close()
+        print(f"SQLite saved  → {db_path}  (run #{run_id}, {len(trades):,} trades)")
+    except Exception as exc:
+        print(f"  ⚠ SQLite save failed: {exc}")
 
 
 # =========================================================================
@@ -912,14 +831,19 @@ def main():
         )
     print(f"\nLoading {csv_path}...")
 
-    # Auto-detect: tick data (bid/ask columns) vs candle data (OHLC columns)
-    with open(csv_path, "r") as f:
-        header = f.readline().strip().lower()
-    if "bid" in header and "ask" in header:
-        print("  Detected tick data format (bid/ask) — building M1 candles from ticks")
-        m1_df = TickDataAdapter().load(str(csv_path))
+    # Auto-detect: parquet → ParquetAdapter (handles bar + tick internally)
+    #                CSV    → tick detection → TickDataAdapter or HistDataAdapter
+    _ext = csv_path.suffix.lower()
+    if _ext in (".parquet", ".pq", ".parq"):
+        m1_df = get_adapter(str(csv_path)).load(str(csv_path))
     else:
-        m1_df = HistDataAdapter().load(str(csv_path))
+        with open(csv_path, "r") as f:
+            header = f.readline().strip().lower()
+        if "bid" in header and "ask" in header:
+            print("  Detected tick data format (bid/ask) — building M1 candles from ticks")
+            m1_df = TickDataAdapter().load(str(csv_path))
+        else:
+            m1_df = HistDataAdapter().load(str(csv_path))
     print(f"Loaded {len(m1_df):,} M1 candles  "
           f"{m1_df.index[0]} → {m1_df.index[-1]}")
 

@@ -15,6 +15,12 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Data (large CSVs — keep out of git)
+# Data (large files — keep out of git)
 data/DAT_*.csv
 data/merged_output*.csv
+data/*.parquet
+data/*.pq
+
+# SQLite databases
+*.db
+results/trades.db

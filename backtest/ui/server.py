@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from core.data_loader import HistDataAdapter
+from core.data_loader import HistDataAdapter, get_adapter
 from core.market_data_store import MarketDataStore
 from detectors.strategies.registry import STRATEGY_REGISTRY, _populate_registry
 
@@ -49,7 +49,7 @@ def get_store(csv_path: str, symbol: str) -> tuple[MarketDataStore, int, pd.Data
         full_path = str(DATA_DIR / csv_path)
 
     print(f"Loading {full_path}...")
-    adapter = HistDataAdapter()
+    adapter = get_adapter(full_path)
     m1_df = adapter.load(full_path)
     raw_ticks = adapter.raw_ticks  # None for bar data, DataFrame for tick data
     store = MarketDataStore()
@@ -108,9 +108,11 @@ async def list_strategies():
 
 @app.get("/files")
 async def list_files():
-    """List available CSV data files."""
+    """List available data files (CSV + Parquet)."""
     files = []
-    for f in sorted(DATA_DIR.glob("*.csv")):
+    for f in sorted(DATA_DIR.glob("*.*")):
+        if f.suffix.lower() not in (".csv", ".parquet", ".pq", ".parq"):
+            continue
         size_mb = f.stat().st_size / 1024 / 1024
         files.append({
             "name": f.name,

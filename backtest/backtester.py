@@ -55,11 +55,15 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.data_loader import HistDataAdapter, TickDataAdapter
+from core.data_loader import HistDataAdapter, TickDataAdapter, get_adapter
 from core.market_data_store import MarketDataStore
 from detectors.strategies.registry import STRATEGY_REGISTRY, _populate_registry
 from detectors.strategies.base import BaseStrategy
 from detectors.signal import PatternSignal
+from backtest.engine import (
+    compute_tp_sl, compute_pnl, build_result, update_equity,
+    check_dedup,
+)
 
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger("backtest")
@@ -397,7 +401,6 @@ def _run_strategy_job(job: dict) -> dict:
     peak_balance      = initial_balance
     max_dd            = 0.0
 
-    _dedup_tol = 1e-6
     last_entry_price: Optional[float] = None
 
     for i in range(lookback, arrays.n):
@@ -412,14 +415,12 @@ def _run_strategy_job(job: dict) -> dict:
         # ── 2. Skip signal evaluation if trade is open ────────────────────
         if open_trade is not None:
             # Update equity curve
-            ep    = open_trade.entry_price
-            close = float(arrays.closes[i])
-            unreal = (close - ep if open_trade.direction == "LONG"
-                      else ep - close) / pip_value
-            bal = initial_balance + (realized_pnl_pips + unreal) * lot_size * 100
-            balance_curve.append(bal)
-            peak_balance = max(peak_balance, bal)
-            max_dd = max(max_dd, (peak_balance - bal) / peak_balance * 100)
+            balance_curve, peak_balance, max_dd = update_equity(
+                open_trade.entry_price, open_trade.direction,
+                float(arrays.closes[i]), realized_pnl_pips,
+                pip_value, initial_balance, lot_size,
+                balance_curve, peak_balance, max_dd,
+            )
             continue
 
         # ── 3. Get signals ─────────────────────────────────────────────────
@@ -480,45 +481,11 @@ def _run_strategy_job(job: dict) -> dict:
             tp = sig.metadata.get("take_profit", 0.0)
             sl = sig.metadata.get("stop_loss",   0.0)
 
-            # ATR fallback for missing TP/SL
-            if not tp or not sl:
-                try:
-                    primary_tf = required_tfs[0] if required_tfs else "M1"
-                    win_start = max(0, i - lookback)
-                    _df = pd.DataFrame(
-                        {"high": arrays.highs[win_start:i+1],
-                         "low":  arrays.lows[win_start:i+1],
-                         "close": arrays.closes[win_start:i+1]},
-                    )
-                    BaseStrategy.compute_tp_sl(sig, _df)
-                    tp = sig.metadata.get("take_profit", 0.0)
-                    sl = sig.metadata.get("stop_loss",   0.0)
-                except Exception:
-                    pass
-
-            # S/R override: if use_sr is enabled, try to improve TP/SL
-            if use_sr and tp and sl:
-                try:
-                    from detectors.support_resistance import SupportResistance
-                    win_start = max(0, i - lookback)
-                    _sr_df = pd.DataFrame(
-                        {"open":  arrays.opens[win_start:i+1],
-                         "high":  arrays.highs[win_start:i+1],
-                         "low":   arrays.lows[win_start:i+1],
-                         "close": arrays.closes[win_start:i+1]},
-                    )
-                    sr = SupportResistance(_sr_df, pip_tolerance=0.10, min_touches=2)
-                    atr_sl = abs(entry_price - sl)  # current SL distance as ATR proxy
-                    sr_tp, sr_sl = sr.get_tp_sl(entry_price, direction, atr_sl)
-                    if sr_tp and sr_sl:
-                        tp = sr_tp
-                        sl = sr_sl
-                except Exception:
-                    pass  # fall back to ATR TP/SL
+            # TP/SL with ATR fallback + optional S/R override
+            tp, sl = compute_tp_sl(sig, arrays, i, lookback, use_sr)
 
             # Deduplicate
-            if (last_entry_price is not None and
-                    abs(last_entry_price - entry_price) < _dedup_tol):
+            if check_dedup(last_entry_price, entry_price):
                 pass
             elif direction in ("LONG", "SHORT") and tp and sl:
                 risk   = abs(entry_price - sl)  / pip_value
@@ -531,10 +498,7 @@ def _run_strategy_job(job: dict) -> dict:
                 cur_ts = pd.Timestamp(arrays.timestamps[i])
                 exit_ts = pd.Timestamp(arrays.timestamps[exit_idx])
 
-                if direction == "LONG":
-                    pnl = (exit_price - entry_price) / pip_value
-                else:
-                    pnl = (entry_price - exit_price) / pip_value
+                pnl = compute_pnl(direction, entry_price, exit_price, pip_value)
 
                 trade = Trade(
                     strategy    = name,
@@ -562,23 +526,20 @@ def _run_strategy_job(job: dict) -> dict:
                 realized_pnl_pips += 0   # don't add yet; add at close bar
 
         # ── 5. Equity curve ────────────────────────────────────────────────
-        close = float(arrays.closes[i])
-        unreal = 0.0
-        if open_trade is not None:
-            ep = open_trade.entry_price
-            unreal = (close - ep if open_trade.direction == "LONG"
-                      else ep - close) / pip_value
-        bal = initial_balance + (realized_pnl_pips + unreal) * lot_size * 100
-        balance_curve.append(bal)
-        peak_balance = max(peak_balance, bal)
-        max_dd = max(max_dd, (peak_balance - bal) / peak_balance * 100)
+        balance_curve, peak_balance, max_dd = update_equity(
+            open_trade.entry_price if open_trade else None,
+            open_trade.direction if open_trade else "",
+            float(arrays.closes[i]), realized_pnl_pips,
+            pip_value, initial_balance, lot_size,
+            balance_curve, peak_balance, max_dd,
+        )
 
     # Close any still-open trade at EOD
     if open_trade is not None:
         realized_pnl_pips += open_trade.pnl_pips
         trades.append(open_trade)
 
-    return _build_result(name, trades, max_dd, balance_curve)
+    return build_result(name, trades, max_dd, balance_curve)
 
 
 def _error_result(name: str, err: str) -> dict:
@@ -592,42 +553,6 @@ def _error_result(name: str, err: str) -> dict:
         "trades": [], "balance_curve": [],
     }
 
-
-def _build_result(
-    name: str,
-    trades: list[Trade],
-    max_dd: float,
-    balance_curve: list[float],
-) -> dict:
-    total        = len(trades)
-    winning      = [t for t in trades if t.pnl_pips > 0]
-    losing       = [t for t in trades if t.pnl_pips <= 0]
-    total_pnl    = sum(t.pnl_pips for t in trades)
-    gross_profit = sum(t.pnl_pips for t in winning)
-    gross_loss   = abs(sum(t.pnl_pips for t in losing))
-    win_rate     = len(winning) / total if total > 0 else 0.0
-    avg_win      = gross_profit / len(winning) if winning else 0.0
-    avg_loss     = gross_loss   / len(losing)  if losing  else 0.0
-    expectancy   = win_rate * avg_win - (1 - win_rate) * avg_loss
-
-    return {
-        "strategy":         name,
-        "total_trades":     total,
-        "winning_trades":   len(winning),
-        "losing_trades":    len(losing),
-        "win_rate":         round(win_rate * 100, 2),
-        "total_pnl_pips":   round(total_pnl, 2),
-        "avg_pnl_pips":     round(total_pnl / total, 2) if total > 0 else 0,
-        "expectancy_pips":  round(expectancy, 2),
-        "profit_factor":    round(gross_profit / gross_loss, 2) if gross_loss > 0 else float("inf"),
-        "max_drawdown_pct": round(max_dd, 2),
-        "gross_profit":     round(gross_profit, 2),
-        "gross_loss":       round(gross_loss, 2),
-        "avg_mae_pips":     round(sum(t.mae_pips for t in trades) / total, 2) if total > 0 else 0,
-        "avg_mfe_pips":     round(sum(t.mfe_pips for t in trades) / total, 2) if total > 0 else 0,
-        "trades":           trades,
-        "balance_curve":    balance_curve,
-    }
 
 
 # =========================================================================
@@ -864,6 +789,38 @@ def _save_trades_csv(
         latest.unlink()
     latest.symlink_to(out_path.name)
 
+    # ---- SQLite persistence -------------------------------------------
+    try:
+        from backtest.trade_store import init_db, save_trades
+        db_path = out_dir / "trades.db"
+        conn = init_db(db_path)
+        all_trades = []
+        for r in results:
+            all_trades.extend(r["trades"])
+        run_meta = {
+            "data_file": meta.get("data_file", ""),
+            "symbol": meta.get("symbol", ""),
+            "strategies": [meta.get("strategies_filter", "all")],
+            "lookback": 0,
+            "threshold": 0,
+            "n_strategies": meta.get("n_strategies", 0),
+        }
+        # Compute summary from all trades
+        pnls = [t.pnl_pips for t in all_trades]
+        winning = sum(1 for p in pnls if p > 0)
+        result_stats = {
+            "total_trades": len(all_trades),
+            "winning_trades": winning,
+            "losing_trades": len(all_trades) - winning,
+            "win_rate": winning / len(all_trades) * 100 if all_trades else 0,
+            "total_pnl_pips": round(sum(pnls), 1),
+        }
+        run_id = save_trades(conn, all_trades, run_meta, result_stats)
+        conn.close()
+        print(f"SQLite saved  → {db_path}  (run #{run_id}, {len(all_trades):,} trades)")
+    except Exception as exc:
+        print(f"  ⚠ SQLite save failed: {exc}")
+
     return out_path
 
 
@@ -966,14 +923,19 @@ def main() -> None:
         csv_path = Path(__file__).parent.parent / "data" / "DAT_ASCII_USDJPY_M1_202605.csv"
     print(f"\nLoading {csv_path}...")
 
-    # Auto-detect: tick data (bid/ask columns) vs candle data (OHLC columns)
-    with open(csv_path, "r") as f:
-        header = f.readline().strip().lower()
-    if "bid" in header and "ask" in header:
-        print("  Detected tick data format (bid/ask) — building M1 candles from ticks")
-        m1_df = TickDataAdapter().load(str(csv_path))
+    # Auto-detect: parquet → ParquetAdapter (handles bar + tick internally)
+    #                CSV    → tick detection → TickDataAdapter or HistDataAdapter
+    _ext = csv_path.suffix.lower()
+    if _ext in (".parquet", ".pq", ".parq"):
+        m1_df = get_adapter(str(csv_path)).load(str(csv_path))
     else:
-        m1_df = HistDataAdapter().load(str(csv_path))
+        with open(csv_path, "r") as f:
+            header = f.readline().strip().lower()
+        if "bid" in header and "ask" in header:
+            print("  Detected tick data format (bid/ask) — building M1 candles from ticks")
+            m1_df = TickDataAdapter().load(str(csv_path))
+        else:
+            m1_df = HistDataAdapter().load(str(csv_path))
     print(f"Loaded {len(m1_df):,} M1 candles  {m1_df.index[0]} → {m1_df.index[-1]}")
 
     store = MarketDataStore()
