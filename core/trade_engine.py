@@ -286,7 +286,7 @@ class TradeEngine:
 
     def get_stats(self) -> dict:
         """Compute standard stats from trade history."""
-        from backtest.engine import build_result
+        from core.engine import build_result
         return build_result("ENGINE", self._trades, self._max_dd, self._balance_curve)
 
     def reset(self) -> None:

@@ -38,7 +38,7 @@ from detectors.strategies import (
     get_strategy_class,
 )
 from detectors.signal import PatternSignal
-from views.chart_renderer import ChartRenderer
+from ui.streamlit_app.components.chart_renderer import ChartRenderer
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -148,7 +148,7 @@ st.markdown("""
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-DEFAULT_CSV = str(Path(__file__).parent / "data" / "DAT_ASCII_USDJPY_M1_202605.csv")
+DEFAULT_CSV = str(Path(__file__).parent.parent.parent / "data" / "DAT_ASCII_USDJPY_M1_202605.csv")
 TIMEFRAMES = ["M1", "M5", "H1", "D1"]
 SPEEDS = {"0.5×": 2.0, "1×": 1.0, "2×": 0.5, "5×": 0.2, "10×": 0.1, "20×": 0.05, "50×": 0.02, "MAX": 0.0}
 CHART_LOOKBACK = 100
