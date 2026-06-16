@@ -17,7 +17,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from detectors.signal import PatternSignal
-from core.trade_engine import Position
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +41,7 @@ class ChartRenderer:
         cls,
         market_data: Union[pd.DataFrame, dict[str, pd.DataFrame]],
         patterns: Optional[list[PatternSignal]] = None,
-        trades: Optional[list[Position]] = None,
+        trades: Optional[list] = None,
         symbol: str = "EURUSD",
         timeframe: str = "M1",
         show_volume: bool = True,
@@ -453,13 +452,15 @@ class ChartRenderer:
             ), row=row, col=1)
 
     @staticmethod
-    def _add_trade_markers(fig: go.Figure, trades: list[Position], df: pd.DataFrame, row: int) -> None:
+    def _add_trade_markers(fig: go.Figure, trades: list, df: pd.DataFrame, row: int) -> None:
         entries_buy_x, entries_buy_y = [], []
         entries_sell_x, entries_sell_y = [], []
         exits_x, exits_y = [], []
 
         for pos in trades:
-            if pos.direction == "BUY":
+            d = getattr(pos, "direction", "")
+            is_buy = d in ("BUY", "LONG")
+            if is_buy:
                 entries_buy_x.append(pos.entry_time)
                 entries_buy_y.append(pos.entry_price)
             else:
