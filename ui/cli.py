@@ -28,7 +28,7 @@ from core.data_loader import HistDataAdapter, TickDataAdapter, get_adapter
 from core.market_data_store import MarketDataStore
 from core.trade_engine import TradeConfig, TradeEngine
 from core.signal_engine import SignalEngine
-from backtest.backtester import CandleArrays
+from core.engine import CandleArrays
 
 
 def main():

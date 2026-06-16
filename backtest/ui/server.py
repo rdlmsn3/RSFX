@@ -131,7 +131,7 @@ async def run_backtest(req: BacktestRequest):
     try:
         from core.trade_engine import TradeConfig, TradeEngine
         from core.signal_engine import SignalEngine
-        from backtest.backtester import CandleArrays
+        from core.engine import CandleArrays
         from core.events import BarEvent
 
         store, n_candles, raw_ticks = get_store(req.csv_file, req.symbol)

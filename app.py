@@ -30,7 +30,7 @@ from core.market_data_store import MarketDataStore
 from core.trade_engine import TradeConfig, TradeEngine, TradeRecord, OpenPosition
 from core.signal_engine import SignalEngine
 from core.events import BarEvent, SignalEvent
-from backtest.backtester import CandleArrays
+from core.engine import CandleArrays
 from detectors.strategies import (
     STRATEGY_REGISTRY,
     CATEGORY_ORDER,
