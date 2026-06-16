@@ -29,6 +29,26 @@ from detectors.strategies.registry import STRATEGY_REGISTRY, _populate_registry
 app = FastAPI(title="RSFX Backtester")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+
+def _sanitize(obj):
+    """Recursively convert numpy types and inf/nan for JSON serialization."""
+    import numpy as np
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize(v) for v in obj]
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        v = float(obj)
+        return 0.0 if (v != v or v == float('inf') or v == float('-inf')) else v
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, float):
+        if obj != obj or obj == float('inf') or obj == float('-inf'):  # nan or inf
+            return 0.0
+    return obj
+
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 
 # Cache: csv_path -> (MarketDataStore, candle_count, date_range, raw_ticks)
@@ -243,7 +263,7 @@ async def run_backtest(req: BacktestRequest):
         except Exception as save_err:
             print(f"Warning: failed to save to SQLite: {save_err}")
 
-        return {
+        return _sanitize({
             "result": result,
             "trades": trade_list,
             "elapsed": elapsed,
@@ -256,7 +276,7 @@ async def run_backtest(req: BacktestRequest):
                 "symbol": req.symbol,
                 "use_sr": req.use_sr,
             }
-        }
+        })
 
     except Exception as exc:
         import traceback

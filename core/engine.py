@@ -277,7 +277,7 @@ def build_result(
         "total_pnl_pips":   round(total_pnl, 2),
         "avg_pnl_pips":     round(total_pnl / total, 2) if total > 0 else 0,
         "expectancy_pips":  round(expectancy, 2),
-        "profit_factor":    round(gross_profit / gross_loss, 2) if gross_loss > 0 else float("inf"),
+        "profit_factor":    round(gross_profit / gross_loss, 2) if gross_loss > 0 else 0.0,
         "max_drawdown_pct": round(max_dd, 2),
         "gross_profit":     round(gross_profit, 2),
         "gross_loss":       round(gross_loss, 2),
