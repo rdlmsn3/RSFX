@@ -1,16 +1,24 @@
 """
 core/trade_engine.py
 --------------------
-Trade simulation engine.
+Unified trade execution engine.
 
-Currently a structured placeholder ready for strategy integration.
+Works identically in backtest replay and live mode.
+All three UIs (CLI, Backtest Web, Streamlit) consume this.
 
-Future integrations (subscribe to events without modifying this class)
-----------------------------------------------------------------------
-- StrategyEngine publishes TradeSignalEvent → TradeEngine opens positions
-- RiskManager publishes RiskOverrideEvent → TradeEngine modifies SL/TP
-- PerformanceAnalytics subscribes to TradeEvent → computes P&L metrics
-- JournalSystem subscribes to TradeEvent → persists trade records
+Usage:
+    config = TradeConfig(symbol="USDJPY", pip_value=0.01, lot_size=0.01)
+    engine = TradeEngine(config)
+
+    # Bar-level backtest
+    for bar in bars:
+        signals = signal_engine.evaluate(i, arrays, tf_arrays)
+        for sig in signals:
+            engine.open(sig)
+        engine.on_bar(BarEvent(...))
+
+    # Or tick-level
+    engine.on_tick(bid=120.50, ask=120.52, timestamp=ts)
 """
 
 from __future__ import annotations
@@ -19,325 +27,348 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from core.event_bus import EventBus
-from core.events import MarketTickEvent, PatternDetectedEvent, TradeEvent
+from core.events import (
+    SignalEvent, BarEvent, TradeEvent, MarketTickEvent,
+)
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class Position:
-    """Represents a single open or closed trade position."""
-    id: str
-    symbol: str
-    direction: str                    # "BUY" | "SELL"
-    entry_price: float
-    entry_time: pd.Timestamp
+class TradeConfig:
+    """Trade execution parameters."""
+    symbol: str = "USDJPY"
+    pip_value: float = 0.01
     lot_size: float = 0.01
-    stop_loss: Optional[float] = None
-    take_profit: Optional[float] = None
-    exit_price: Optional[float] = None
+    initial_balance: float = 10_000.0
+    spread_pips: float = 0.5
+    slippage_pips: float = 0.0
+    min_rr: float = 1.0
+    use_sr: bool = False
+    max_lookback: int = 100
+
+
+@dataclass
+class TradeRecord:
+    """Immutable record of a completed trade."""
+    id: str
+    strategy: str
+    direction: str          # "LONG" | "SHORT"
+    entry_time: pd.Timestamp
+    entry_price: float
+    stop_loss: float
+    take_profit: float
     exit_time: Optional[pd.Timestamp] = None
-    pnl: Optional[float] = None
-    status: str = "OPEN"              # "OPEN" | "CLOSED"
+    exit_price: Optional[float] = None
+    exit_reason: str = ""   # "TP" | "SL" | "EOD" | "MANUAL"
+    pnl_pips: float = 0.0
+    mae_pips: float = 0.0
+    mfe_pips: float = 0.0
+    bars_held: int = 0
+    risk_pips: float = 0.0
+    reward_pips: float = 0.0
+    rr_ratio: float = 0.0
+    spread_cost: float = 0.0
+    metadata: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "strategy": self.strategy,
+            "direction": self.direction,
+            "entry_time": self.entry_time,
+            "entry_price": self.entry_price,
+            "stop_loss": self.stop_loss,
+            "take_profit": self.take_profit,
+            "exit_time": self.exit_time,
+            "exit_price": self.exit_price,
+            "exit_reason": self.exit_reason,
+            "pnl_pips": round(self.pnl_pips, 2),
+            "mae_pips": round(self.mae_pips, 2),
+            "mfe_pips": round(self.mfe_pips, 2),
+            "bars_held": self.bars_held,
+            "risk_pips": round(self.risk_pips, 2),
+            "reward_pips": round(self.reward_pips, 2),
+            "rr_ratio": round(self.rr_ratio, 2),
+            "spread_cost": round(self.spread_cost, 2),
+            **{f"sig_{k}": v for k, v in self.metadata.items()
+               if isinstance(v, (int, float, str, bool))},
+        }
+
+
+@dataclass
+class OpenPosition:
+    """Live position being tracked."""
+    id: str
+    strategy: str
+    direction: str
+    entry_time: pd.Timestamp
+    entry_price: float
+    stop_loss: float
+    take_profit: float
+    bar_idx: int = 0
+    current_bar_idx: int = 0
+    mae: float = 0.0
+    mfe: float = 0.0
     metadata: dict = field(default_factory=dict)
 
 
 class TradeEngine:
     """
-    Manages simulated trading positions.
+    Unified trade execution engine.
 
-    Subscribes to MarketTickEvent to:
-    - Mark-to-market open positions (future)
-    - Check SL/TP hit conditions (future)
-    - Update running P&L (future)
+    Works in two modes:
+    - Bar mode: on_bar() called per M1 candle — checks SL/TP on H/L
+    - Tick mode: on_tick() called per tick — checks SL/TP on bid/ask
 
-    Parameters
-    ----------
-    event_bus : EventBus
-        Shared event bus.
-    symbol : str
-        Active trading symbol.
+    All UIs call the same engine. The engine does NOT evaluate strategies —
+    it receives SignalEvents and manages the trade lifecycle.
     """
 
-    def __init__(self, event_bus: EventBus, symbol: str = "EURUSD", data_store=None) -> None:
+    def __init__(self, config: TradeConfig, event_bus: EventBus | None = None) -> None:
+        self.config = config
         self._bus = event_bus
-        self._symbol = symbol
-        self._store = data_store
-
-        self._open_positions: dict[str, Position] = {}
-        self._closed_positions: list[Position] = []
-        self._trade_history: list[dict] = []        # flat record for analytics
-
-        # Subscribe to tick events for position management
-        self._bus.subscribe(MarketTickEvent, self._on_market_tick)
-        # Subscribe to pattern events for order generation
-        self._bus.subscribe(PatternDetectedEvent, self._on_pattern_detected)
-
-        logger.info("TradeEngine initialised for %s.", symbol)
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+        self._open: Optional[OpenPosition] = None
+        self._trades: list[TradeRecord] = []
+        self._balance_curve: list[float] = [config.initial_balance]
+        self._peak_balance: float = config.initial_balance
+        self._max_dd: float = 0.0
+        self._realized_pnl: float = 0.0
+        self._bar_idx: int = 0
+        self._last_entry_price: Optional[float] = None
 
     @property
-    def open_positions(self) -> list[Position]:
-        return list(self._open_positions.values())
+    def trades(self) -> list[TradeRecord]:
+        return list(self._trades)
 
     @property
-    def closed_positions(self) -> list[Position]:
-        return list(self._closed_positions)
+    def open_position(self) -> Optional[OpenPosition]:
+        return self._open
 
     @property
-    def trade_count(self) -> int:
-        return len(self._closed_positions) + len(self._open_positions)
+    def balance_curve(self) -> list[float]:
+        return list(self._balance_curve)
 
-    def open_position(
-        self,
-        direction: str,
-        price: float,
-        timestamp: pd.Timestamp,
-        lot_size: float = 0.01,
-        stop_loss: Optional[float] = None,
-        take_profit: Optional[float] = None,
-        metadata: Optional[dict] = None,
-    ) -> Position:
-        """
-        Open a new simulated position.
+    @property
+    def max_drawdown(self) -> float:
+        return self._max_dd
 
-        Parameters
-        ----------
-        direction : str
-            "BUY" or "SELL".
-        price : float
-            Entry price.
-        timestamp : pd.Timestamp
-            Entry timestamp.
-        lot_size : float
-            Trade size in lots.
-        stop_loss : float, optional
-        take_profit : float, optional
-        metadata : dict, optional
-            Arbitrary key-value pairs (e.g. {"strategy": "breakout"}).
+    @property
+    def realized_pnl_pips(self) -> float:
+        return self._realized_pnl
 
-        Returns
-        -------
-        Position
-            The newly created position.
-        """
-        position = Position(
-            id=str(uuid.uuid4())[:8],
-            symbol=self._symbol,
-            direction=direction.upper(),
-            entry_price=price,
-            entry_time=timestamp,
-            lot_size=lot_size,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            metadata=metadata or {},
-        )
-        self._open_positions[position.id] = position
-
-        self._bus.publish(TradeEvent(
-            action="OPEN",
-            price=price,
-            timestamp=timestamp,
-            symbol=self._symbol,
-            metadata={"position_id": position.id, "direction": direction},
-        ))
-
-        logger.info("Opened %s position %s at %.5f", direction, position.id, price)
-        return position
-
-    def close_position(
-        self,
-        position_id: str,
-        exit_price: float,
-        exit_time: pd.Timestamp,
-        metadata: Optional[dict] = None,
-    ) -> Optional[Position]:
-        """
-        Close an open position and calculate P&L.
-
-        Parameters
-        ----------
-        position_id : str
-            The ID returned by open_position().
-        exit_price : float
-        exit_time : pd.Timestamp
-        metadata : dict, optional
-
-        Returns
-        -------
-        Position or None
-            The closed position, or None if position_id not found.
-        """
-        position = self._open_positions.pop(position_id, None)
-        if position is None:
-            logger.warning("close_position: unknown position_id '%s'", position_id)
-            return None
-
-        position.exit_price = exit_price
-        position.exit_time = exit_time
-        position.status = "CLOSED"
-        position.metadata.update(metadata or {})
-
-        # Basic P&L calculation (pip-based; extend for proper lot sizing)
-        multiplier = 1 if position.direction == "BUY" else -1
-        position.pnl = multiplier * (exit_price - position.entry_price) * position.lot_size * 100_000
-
-        self._closed_positions.append(position)
-        self._trade_history.append({
-            "id": position.id,
-            "symbol": position.symbol,
-            "direction": position.direction,
-            "entry": position.entry_price,
-            "exit": exit_price,
-            "pnl": position.pnl,
-            "entry_time": position.entry_time,
-            "exit_time": exit_time,
-        })
-
-        self._bus.publish(TradeEvent(
-            action="CLOSE",
-            price=exit_price,
-            timestamp=exit_time,
-            symbol=self._symbol,
-            metadata={"position_id": position_id, "pnl": position.pnl},
-        ))
-
-        logger.info("Closed position %s at %.5f, PnL=%.2f", position_id, exit_price, position.pnl)
-        return position
-
-    def modify_stop_loss(self, position_id: str, new_sl: float, timestamp: pd.Timestamp) -> bool:
-        """
-        Modify the stop loss of an open position.
-
-        Future: RiskManager can call this directly or via event.
-        """
-        position = self._open_positions.get(position_id)
-        if position is None:
-            return False
-        position.stop_loss = new_sl
-
-        self._bus.publish(TradeEvent(
-            action="MODIFY_SL",
-            price=new_sl,
-            timestamp=timestamp,
-            symbol=self._symbol,
-            metadata={"position_id": position_id},
-        ))
-        return True
-
-    def modify_take_profit(self, position_id: str, new_tp: float, timestamp: pd.Timestamp) -> bool:
-        """
-        Modify the take profit of an open position.
-
-        Future: Strategy Engine can trail TP via this method.
-        """
-        position = self._open_positions.get(position_id)
-        if position is None:
-            return False
-        position.take_profit = new_tp
-
-        self._bus.publish(TradeEvent(
-            action="MODIFY_TP",
-            price=new_tp,
-            timestamp=timestamp,
-            symbol=self._symbol,
-            metadata={"position_id": position_id},
-        ))
-        return True
-
-    def reset(self) -> None:
-        """Clear all positions (called on playback reset)."""
-        self._open_positions.clear()
-        self._closed_positions.clear()
-        self._trade_history.clear()
-        logger.info("TradeEngine reset.")
-
-    # ------------------------------------------------------------------
-    # Event handlers
-    # ------------------------------------------------------------------
-
-    def _on_pattern_detected(self, event: PatternDetectedEvent) -> None:
-        """
-        Open a position when a confluence signal fires.
-        Only trades signals marked as confluence (metadata["confluence"] == True).
-        """
-        meta = event.metadata
-
-        # Only trade confluence signals
-        if not meta.get("confluence", False):
+    def open(self, signal: SignalEvent) -> None:
+        """Open a position from a signal event. Applies spread + slippage."""
+        if self._open is not None:
             return
 
-        direction = meta.get("direction", "")
+        direction = signal.direction
         if direction not in ("LONG", "SHORT"):
             return
 
-        entry_price = meta.get("entry_price")
-        if entry_price is None:
-            # Fallback: use event price if available
+        entry = signal.entry_price
+        if direction == "LONG":
+            entry += (self.config.spread_pips / 2 + self.config.slippage_pips) * self.config.pip_value
+        else:
+            entry -= (self.config.spread_pips / 2 + self.config.slippage_pips) * self.config.pip_value
+
+        tp = signal.take_profit
+        sl = signal.stop_loss
+        if not tp or not sl:
             return
 
-        # Map signal direction to position direction
-        pos_direction = "BUY" if direction == "LONG" else "SELL"
+        # Sanity
+        if direction == "LONG":
+            if tp <= entry:
+                tp = entry + abs(tp - entry)
+            if sl >= entry:
+                sl = entry - abs(sl - entry)
+        else:
+            if tp >= entry:
+                tp = entry - abs(tp - entry)
+            if sl <= entry:
+                sl = entry + abs(sl - entry)
 
-        self.open_position(
-            direction=pos_direction,
-            price=entry_price,
-            timestamp=event.timestamp,
-            stop_loss=meta.get("stop_loss"),
-            take_profit=meta.get("take_profit"),
-            metadata={
-                "strategy": meta.get("strategy", ""),
-                "confluence_count": meta.get("confluence_count", 0),
-                "signal_name": event.pattern_name,
-            },
+        # Dedup
+        if self._last_entry_price is not None:
+            if abs(self._last_entry_price - entry) < 1e-6:
+                return
+
+        # Min R:R
+        risk = abs(entry - sl) / self.config.pip_value
+        reward = abs(tp - entry) / self.config.pip_value
+        if risk <= 0:
+            return
+        if (reward / risk) < self.config.min_rr:
+            return
+
+        pos = OpenPosition(
+            id=str(uuid.uuid4())[:8],
+            strategy=signal.strategy_name,
+            direction=direction,
+            entry_time=signal.timestamp,
+            entry_price=entry,
+            stop_loss=sl,
+            take_profit=tp,
+            bar_idx=self._bar_idx,
+            metadata=signal.metadata,
+        )
+        self._open = pos
+        self._last_entry_price = entry
+
+        if self._bus:
+            self._bus.publish(TradeEvent(
+                action="OPEN", price=entry, timestamp=signal.timestamp,
+                symbol=self.config.symbol,
+                metadata={"position_id": pos.id, "direction": direction},
+            ))
+
+    def on_bar(self, bar: BarEvent) -> Optional[TradeRecord]:
+        """Process a bar event. Checks SL/TP on high/low."""
+        self._bar_idx += 1
+
+        if self._open is None:
+            self._update_equity(bar.close)
+            return None
+
+        pos = self._open
+        pos.current_bar_idx = self._bar_idx
+
+        if pos.direction == "LONG":
+            adverse = (bar.low - pos.entry_price) / self.config.pip_value
+            favorable = (bar.high - pos.entry_price) / self.config.pip_value
+        else:
+            adverse = (pos.entry_price - bar.high) / self.config.pip_value
+            favorable = (pos.entry_price - bar.low) / self.config.pip_value
+
+        pos.mae = min(pos.mae, adverse)
+        pos.mfe = max(pos.mfe, favorable)
+
+        closed = self._check_exit(bar.high, bar.low, bar.close, bar.timestamp)
+        self._update_equity(bar.close)
+        return closed
+
+    def on_tick(self, bid: float, ask: float, timestamp: pd.Timestamp) -> Optional[TradeRecord]:
+        """Process a tick event. Checks SL/TP on bid/ask."""
+        if self._open is None:
+            return None
+
+        pos = self._open
+
+        if pos.direction == "LONG":
+            adverse = (bid - pos.entry_price) / self.config.pip_value
+            favorable = (bid - pos.entry_price) / self.config.pip_value
+            if bid <= pos.stop_loss:
+                return self._close(pos.stop_loss, timestamp, "SL")
+            elif bid >= pos.take_profit:
+                return self._close(pos.take_profit, timestamp, "TP")
+        else:
+            adverse = (pos.entry_price - ask) / self.config.pip_value
+            favorable = (pos.entry_price - ask) / self.config.pip_value
+            if ask >= pos.stop_loss:
+                return self._close(pos.stop_loss, timestamp, "SL")
+            elif ask <= pos.take_profit:
+                return self._close(pos.take_profit, timestamp, "TP")
+
+        pos.mae = min(pos.mae, adverse)
+        pos.mfe = max(pos.mfe, favorable)
+        return None
+
+    def force_close(self, price: float, timestamp: pd.Timestamp, reason: str = "EOD") -> Optional[TradeRecord]:
+        """Force-close the open position."""
+        if self._open is None:
+            return None
+        return self._close(price, timestamp, reason)
+
+    def get_stats(self) -> dict:
+        """Compute standard stats from trade history."""
+        from backtest.engine import build_result
+        return build_result("ENGINE", self._trades, self._max_dd, self._balance_curve)
+
+    def reset(self) -> None:
+        """Clear all state for a new backtest."""
+        self._open = None
+        self._trades.clear()
+        self._balance_curve = [self.config.initial_balance]
+        self._peak_balance = self.config.initial_balance
+        self._max_dd = 0.0
+        self._realized_pnl = 0.0
+        self._bar_idx = 0
+        self._last_entry_price = None
+
+    def _check_exit(self, high: float, low: float, close: float, timestamp: pd.Timestamp) -> Optional[TradeRecord]:
+        pos = self._open
+        if pos is None:
+            return None
+        if pos.direction == "LONG":
+            if low <= pos.stop_loss:
+                return self._close(pos.stop_loss, timestamp, "SL")
+            elif high >= pos.take_profit:
+                return self._close(pos.take_profit, timestamp, "TP")
+        else:
+            if high >= pos.stop_loss:
+                return self._close(pos.stop_loss, timestamp, "SL")
+            elif low <= pos.take_profit:
+                return self._close(pos.take_profit, timestamp, "TP")
+        return None
+
+    def _close(self, exit_price: float, timestamp: pd.Timestamp, reason: str) -> TradeRecord:
+        pos = self._open
+        assert pos is not None
+
+        if pos.direction == "LONG":
+            pnl = (exit_price - pos.entry_price) / self.config.pip_value
+        else:
+            pnl = (pos.entry_price - exit_price) / self.config.pip_value
+
+        spread_cost = self.config.spread_pips
+        net_pnl = pnl - spread_cost
+
+        risk = abs(pos.entry_price - pos.stop_loss) / self.config.pip_value
+        reward = abs(pos.take_profit - pos.entry_price) / self.config.pip_value
+
+        trade = TradeRecord(
+            id=pos.id, strategy=pos.strategy, direction=pos.direction,
+            entry_time=pos.entry_time, entry_price=pos.entry_price,
+            stop_loss=pos.stop_loss, take_profit=pos.take_profit,
+            exit_time=timestamp, exit_price=exit_price, exit_reason=reason,
+            pnl_pips=round(net_pnl, 2), mae_pips=round(pos.mae, 2),
+            mfe_pips=round(pos.mfe, 2), bars_held=self._bar_idx - pos.bar_idx,
+            risk_pips=round(risk, 2), reward_pips=round(reward, 2),
+            rr_ratio=round(reward / risk, 2) if risk > 0 else 0.0,
+            spread_cost=round(spread_cost, 2), metadata=pos.metadata,
         )
 
-    def _on_market_tick(self, event: MarketTickEvent) -> None:
-        """
-        Check open positions for SL/TP breach on each tick.
-        Closes positions that hit stop loss or take profit.
-        """
-        if not self._open_positions or self._store is None:
-            return
+        self._trades.append(trade)
+        self._realized_pnl += net_pnl
+        self._open = None
 
-        # Get current close price from the data store
-        try:
-            m1_df = self._store.get_window(
-                symbol=self._symbol,
-                timeframe="M1",
-                current_timestamp=event.timestamp,
-                lookback=1,
-            )
-            if m1_df.empty:
-                return
-            current_price = float(m1_df["close"].iloc[-1])
-        except Exception:
-            return
+        if self._bus:
+            self._bus.publish(TradeEvent(
+                action="CLOSE", price=exit_price, timestamp=timestamp,
+                symbol=self.config.symbol,
+                metadata={"position_id": pos.id, "pnl": net_pnl, "reason": reason},
+            ))
 
-        to_close: list[tuple[str, float, str]] = []
+        return trade
 
-        for pos_id, pos in self._open_positions.items():
-            if pos.direction == "BUY":
-                if pos.stop_loss is not None and current_price <= pos.stop_loss:
-                    to_close.append((pos_id, pos.stop_loss, "SL"))
-                elif pos.take_profit is not None and current_price >= pos.take_profit:
-                    to_close.append((pos_id, pos.take_profit, "TP"))
-            else:  # SELL
-                if pos.stop_loss is not None and current_price >= pos.stop_loss:
-                    to_close.append((pos_id, pos.stop_loss, "SL"))
-                elif pos.take_profit is not None and current_price <= pos.take_profit:
-                    to_close.append((pos_id, pos.take_profit, "TP"))
+    def _update_equity(self, current_close: float) -> None:
+        unreal = 0.0
+        if self._open is not None:
+            if self._open.direction == "LONG":
+                unreal = (current_close - self._open.entry_price) / self.config.pip_value
+            else:
+                unreal = (self._open.entry_price - current_close) / self.config.pip_value
 
-        for pos_id, exit_price, reason in to_close:
-            self.close_position(
-                position_id=pos_id,
-                exit_price=exit_price,
-                exit_time=event.timestamp,
-                metadata={"exit_reason": reason},
-            )
+        bal = self.config.initial_balance + (
+            self._realized_pnl + unreal
+        ) * self.config.lot_size * 100_000 * self.config.pip_value
+
+        self._balance_curve.append(bal)
+        self._peak_balance = max(self._peak_balance, bal)
+        if self._peak_balance > 0:
+            self._max_dd = max(self._max_dd, (self._peak_balance - bal) / self._peak_balance * 100)
