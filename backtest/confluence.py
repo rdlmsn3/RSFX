@@ -717,7 +717,7 @@ def _save_results(
 
     # ---- SQLite persistence -------------------------------------------
     try:
-        from backtest.trade_store import init_db, save_trades
+        from core.trade_store import init_db, save_trades
         db_path = base / "trades.db"
         conn = init_db(db_path)
         run_meta = {

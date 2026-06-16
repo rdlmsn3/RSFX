@@ -791,7 +791,7 @@ def _save_trades_csv(
 
     # ---- SQLite persistence -------------------------------------------
     try:
-        from backtest.trade_store import init_db, save_trades
+        from core.trade_store import init_db, save_trades
         db_path = out_dir / "trades.db"
         conn = init_db(db_path)
         all_trades = []

@@ -10,7 +10,7 @@ SQLite database with two tables:
   trades  — one row per trade (linked to run_id)
 
 Usage:
-    from backtest.trade_store import init_db, save_trades
+    from core.trade_store import init_db, save_trades
 
     db = init_db("results/trades.db")
     run_id = save_trades(db, trades, run_meta, result_stats)
