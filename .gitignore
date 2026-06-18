@@ -24,3 +24,4 @@ data/*.pq
 # SQLite databases
 *.db
 results/trades.db
+data/test_small_ticks.csv
