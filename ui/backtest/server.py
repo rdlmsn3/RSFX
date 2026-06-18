@@ -151,24 +151,17 @@ async def run_backtest(req: BacktestRequest):
     try:
         from core.trade_engine import TradeConfig, TradeEngine
         from core.signal_engine import SignalEngine
-        from core.engine import CandleArrays
-        from core.events import BarEvent
+        from core.event_bus import EventBus
+        from core.candle_stream import IncrementalCandleBuilder, StreamingCandleArrays
 
         store, n_candles, raw_ticks = get_store(req.csv_file, req.symbol)
 
-        # Build arrays
-        m1_df = store.get_data(req.symbol, "M1")
-        arrays = CandleArrays.from_dataframe(m1_df)
-        tf_arrays = {}
-        for tf in store.available_timeframes(req.symbol):
-            if tf == "M1":
-                continue
-            try:
-                tf_arrays[tf] = CandleArrays.from_dataframe(store.get_data(req.symbol, tf))
-            except Exception:
-                pass
+        if raw_ticks is None:
+            return {"error": "No tick data available. Only tick files supported."}
 
-        # Create engines
+        # --- Wire up EventBus ---
+        bus = EventBus()
+
         config = TradeConfig(
             symbol=req.symbol,
             pip_value=0.01,
@@ -178,42 +171,53 @@ async def run_backtest(req: BacktestRequest):
             min_rr=req.min_rr,
             use_sr=req.use_sr,
         )
+        trade_engine = TradeEngine(config, event_bus=bus)
         signal_engine = SignalEngine(
             strategy_names=req.strategies,
             lookback=req.lookback,
             threshold=req.threshold,
+            event_bus=bus,
         )
-        trade_engine = TradeEngine(config)
 
-        # Pre-compute indicators
-        signal_engine.precompute(arrays, tf_arrays)
-        
-        trade_engine.attach_ticks(raw_ticks)
-        # Run the backtest loop
+        # --- Determine needed timeframes ---
+        needed_tfs: set[str] = set()
+        for name in req.strategies:
+            needed_tfs.update(STRATEGY_REGISTRY[name]["timeframes"])
+        needed_tfs.discard("M1")
+
+        # --- Streaming arrays + EventBus-aware builders ---
+        m1_arrays = StreamingCandleArrays()
+        tf_arrays_stream = {tf: StreamingCandleArrays() for tf in needed_tfs}
+
+        m1_builder = IncrementalCandleBuilder("M1", event_bus=bus, symbol=req.symbol)
+        tf_builders = {
+            tf: IncrementalCandleBuilder(tf, event_bus=bus, symbol=req.symbol)
+            for tf in needed_tfs
+        }
+
+        signal_engine.attach_arrays(m1_arrays, tf_arrays_stream)
+        signal_engine.precompute(m1_arrays, tf_arrays_stream)
+
+        # --- Tick loop: 2 lines of core logic ---
         t0 = time.perf_counter()
-        max_start = max(req.lookback, 100)
-        for i in range(max_start, arrays.n):
-            signals = signal_engine.evaluate(i, arrays, tf_arrays)
-            for sig in signals:
-                trade_engine.open(sig)
-            bar_event = BarEvent(
-                timestamp=arrays.timestamps[i],
-                open=float(arrays.opens[i]),
-                high=float(arrays.highs[i]),
-                low=float(arrays.lows[i]),
-                close=float(arrays.closes[i]),
-                volume=float(arrays.volumes[i]),
-                symbol=req.symbol,
-            )
-            trade_engine.on_bar(bar_event)
+        candles_seen = 0
+
+        for ts, row in raw_ticks.iterrows():
+            bid, ask, vol = float(row["bid"]), float(row["ask"]), float(row.get("volume", 0.0))
+            trade_engine.on_tick(bid, ask, ts)
+            m1_builder.ingest_tick(ts, bid, ask, vol)
+            for builder in tf_builders.values():
+                builder.ingest_tick(ts, bid, ask, vol)
+            candles_seen += 1
+            if candles_seen % 500 == 0:
+                signal_engine.precompute(m1_arrays, tf_arrays_stream)
 
         # Force close any remaining open position
         if trade_engine.open_position:
-            trade_engine.force_close(
-                float(arrays.closes[arrays.n - 1]),
-                pd.Timestamp(arrays.timestamps[arrays.n - 1]),
-                "EOD",
-            )
+            last_bid = float(raw_ticks.iloc[-1]["bid"])
+            last_ask = float(raw_ticks.iloc[-1]["ask"])
+            lp = last_bid if trade_engine.open_position.direction == "LONG" else last_ask
+            trade_engine.force_close(lp, raw_ticks.index[-1], "EOD")
         elapsed = round(time.perf_counter() - t0, 1)
 
         trades = trade_engine.trades
@@ -235,13 +239,13 @@ async def run_backtest(req: BacktestRequest):
         losing = [t for t in trades if t.pnl_pips <= 0]
         win_pips = [t.pnl_pips for t in winning]
         lose_pips = [abs(t.pnl_pips) for t in losing]
-        durations = [t.bars_held for t in trades]
+        durations = [t.ticks_held for t in trades]
 
         result["avg_win_pips"] = round(statistics.mean(win_pips), 2) if win_pips else 0
         result["avg_loss_pips"] = round(statistics.mean(lose_pips), 2) if lose_pips else 0
         result["median_win_pips"] = round(statistics.median(win_pips), 2) if win_pips else 0
         result["median_loss_pips"] = round(statistics.median(lose_pips), 2) if lose_pips else 0
-        result["avg_bars_held"] = round(statistics.mean(durations), 1) if durations else 0
+        result["avg_ticks_held"] = round(statistics.mean(durations), 1) if durations else 0
 
         # Build trade list using TradeRecord.to_dict()
         trade_list = [t.to_dict() for t in trades]
