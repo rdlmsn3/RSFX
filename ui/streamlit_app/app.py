@@ -29,6 +29,8 @@ from core.data_loader import HistDataAdapter, get_adapter
 from core.market_data_store import MarketDataStore
 from core.trade_engine import TradeConfig, TradeEngine, TradeRecord, OpenPosition
 from core.signal_engine import SignalEngine
+from core.event_bus import EventBus
+from core.candle_stream import IncrementalCandleBuilder, StreamingCandleArrays
 from core.events import BarEvent, SignalEvent
 from core.engine import CandleArrays
 from detectors.strategies import (
@@ -216,6 +218,8 @@ def _load_data(csv_path: str, symbol: str) -> bool:
 
             st.session_state.store = store
             st.session_state.symbol = symbol
+            st.session_state.adapter = adapter
+            st.session_state.raw_ticks = getattr(adapter, "raw_ticks", None)
             st.session_state.data_loaded = True
 
             logger.info("Data loaded: %s, %d M1 candles.", symbol, store.length(symbol))
@@ -233,11 +237,10 @@ def _load_data(csv_path: str, symbol: str) -> bool:
 
 def _run_backtest() -> bool:
     """
-    Run full backtest with SignalEngine + TradeEngine.
+    Run full backtest with EventBus-driven tick loop.
     Stores all results in session_state.
     Returns True on success.
     """
-    store = st.session_state.store
     symbol = st.session_state.symbol
     strategy_names = st.session_state.selected_strategies
     lookback = st.session_state.lookback
@@ -247,27 +250,20 @@ def _run_backtest() -> bool:
     pip_value = st.session_state.pip_value
     lot_size = st.session_state.lot_size
     balance = st.session_state.balance
+    raw_ticks = st.session_state.get("raw_ticks")
 
     if not strategy_names:
         st.warning("Select at least one strategy.")
         return False
+    if raw_ticks is None or len(raw_ticks) == 0:
+        st.warning("No tick data loaded. Only tick CSV files supported.")
+        return False
 
     with st.spinner("Running backtest …"):
         try:
-            # Build CandleArrays
-            m1_df = store.get_data(symbol, "M1")
-            arrays = CandleArrays.from_dataframe(m1_df)
+            # --- Wire up EventBus ---
+            bus = EventBus()
 
-            tf_arrays: dict[str, CandleArrays] = {}
-            for tf in store.available_timeframes(symbol):
-                if tf == "M1":
-                    continue
-                try:
-                    tf_arrays[tf] = CandleArrays.from_dataframe(store.get_data(symbol, tf))
-                except Exception:
-                    pass
-
-            # Create engines
             config = TradeConfig(
                 symbol=symbol,
                 pip_value=pip_value,
@@ -276,62 +272,76 @@ def _run_backtest() -> bool:
                 spread_pips=spread_pips,
                 min_rr=min_rr,
             )
+            trade_engine = TradeEngine(config, event_bus=bus)
             signal_engine = SignalEngine(
                 strategy_names=strategy_names,
                 lookback=lookback,
                 threshold=threshold,
+                event_bus=bus,
             )
-            trade_engine = TradeEngine(config)
 
-            # Pre-compute indicators
-            signal_engine.precompute(arrays, tf_arrays)
-            if hasattr(adapter, "raw_ticks") and adapter.raw_ticks is not None:
-                trade_engine.attach_ticks(adapter.raw_ticks)
-            # Run backtest loop
-            max_start = max(lookback, 100)
+            # --- Determine needed timeframes ---
+            needed_tfs: set[str] = set()
+            for name in strategy_names:
+                needed_tfs.update(STRATEGY_REGISTRY[name]["timeframes"])
+            needed_tfs.discard("M1")
+
+            # --- Streaming arrays + EventBus-aware builders ---
+            m1_arrays = StreamingCandleArrays()
+            tf_arrays: dict[str, StreamingCandleArrays] = {
+                tf: StreamingCandleArrays() for tf in needed_tfs
+            }
+            m1_builder = IncrementalCandleBuilder("M1", event_bus=bus, symbol=symbol)
+            tf_builders = {
+                tf: IncrementalCandleBuilder(tf, event_bus=bus, symbol=symbol)
+                for tf in needed_tfs
+            }
+
+            signal_engine.attach_arrays(m1_arrays, tf_arrays)
+            signal_engine.precompute(m1_arrays, tf_arrays)
+
+            # --- Tick loop: 2 lines of core logic ---
             signals_timeline: list[tuple[int, SignalEvent]] = []
+            candles_seen = 0
 
-            for i in range(max_start, arrays.n):
-                signals = signal_engine.evaluate(i, arrays, tf_arrays)
-                for sig in signals:
-                    trade_engine.open(sig)
-                    signals_timeline.append((i, sig))
+            # Capture signals for chart rendering
+            def _capture_signal(sig: SignalEvent):
+                signals_timeline.append((m1_arrays.n, sig))
+            bus.subscribe(SignalEvent, _capture_signal)
 
-                bar_event = BarEvent(
-                    timestamp=arrays.timestamps[i],
-                    open=float(arrays.opens[i]),
-                    high=float(arrays.highs[i]),
-                    low=float(arrays.lows[i]),
-                    close=float(arrays.closes[i]),
-                    volume=float(arrays.volumes[i]),
-                    symbol=symbol,
-                )
-                trade_engine.on_bar(bar_event)
+            for ts, row in raw_ticks.iterrows():
+                bid, ask, vol = float(row["bid"]), float(row["ask"]), float(row.get("volume", 0.0))
+                trade_engine.on_tick(bid, ask, ts)
+                m1_builder.ingest_tick(ts, bid, ask, vol)
+                for builder in tf_builders.values():
+                    builder.ingest_tick(ts, bid, ask, vol)
+                candles_seen += 1
+                if candles_seen % 500 == 0:
+                    signal_engine.precompute(m1_arrays, tf_arrays)
 
             # Force close any open position at end
             final_close_trade = None
             if trade_engine.open_position:
-                final_close_trade = trade_engine.force_close(
-                    float(arrays.closes[arrays.n - 1]),
-                    pd.Timestamp(arrays.timestamps[arrays.n - 1]),
-                    "EOD",
-                )
+                last_bid = float(raw_ticks.iloc[-1]["bid"])
+                last_ask = float(raw_ticks.iloc[-1]["ask"])
+                lp = last_bid if trade_engine.open_position.direction == "LONG" else last_ask
+                final_close_trade = trade_engine.force_close(lp, raw_ticks.index[-1], "EOD")
 
-            # Store results
-            st.session_state.arrays = arrays
+            # Store results — m1_arrays replaces CandleArrays for chart rendering
+            st.session_state.arrays = m1_arrays
             st.session_state.tf_arrays = tf_arrays
             st.session_state.signal_engine = signal_engine
             st.session_state.trade_engine = trade_engine
             st.session_state.signals_timeline = signals_timeline
             st.session_state.trades_completed = list(trade_engine.trades)
-            st.session_state.current_index = max_start
-            st.session_state.max_index = arrays.n - 1
+            st.session_state.current_index = 0
+            st.session_state.max_index = m1_arrays.n - 1
             st.session_state.is_playing = False
             st.session_state.final_close_trade = final_close_trade
 
             logger.info(
                 "Backtest complete: %d candles, %d signals, %d trades.",
-                arrays.n, len(signals_timeline), len(trade_engine.trades),
+                m1_arrays.n, len(signals_timeline), len(trade_engine.trades),
             )
             return True
 
