@@ -1,7 +1,7 @@
 """
 core/signal_engine.py
 ---------------------
-Strategy evaluation + signal-buffer confluence.
+Strategy evaluation + signal-buffer confluence + EventBus integration.
 
 Reusable by all backtest modes. Evaluates strategies against
 CandleArrays and returns SignalEvents.
@@ -108,6 +108,7 @@ class SignalEngine:
         lookback: int = 5,
         threshold: int = 2,
         max_lookback: int = 100,
+        event_bus=None,
     ) -> None:
         _populate_registry()
 
@@ -115,6 +116,9 @@ class SignalEngine:
         self._lookback = lookback
         self._threshold = threshold
         self._max_lookback = max_lookback
+        self._bus = event_bus
+        self._m1_arrays = None
+        self._tf_arrays: dict = {}
 
         # Instantiate strategies
         self._strategies: dict[str, BaseStrategy] = {}
@@ -134,6 +138,50 @@ class SignalEngine:
 
         # Precomputed indicators
         self._precomputed: dict[str, dict] = {}
+
+        # EventBus: subscribe to BarEvent for automatic evaluation
+        if self._bus:
+            from core.events import BarEvent
+            self._bus.subscribe(BarEvent, self._on_bar_event)
+
+    def attach_arrays(self, m1_arrays, tf_arrays: dict) -> None:
+        """Bind streaming arrays for EventBus-driven evaluation."""
+        self._m1_arrays = m1_arrays
+        self._tf_arrays = tf_arrays
+
+    def _on_bar_event(self, event) -> None:
+        """EventBus handler — called when CandleStream publishes a BarEvent.
+
+        Converts BarEvent → Bar, appends to the correct StreamingCandleArrays,
+        then evaluates strategies on M1 bar closes.
+
+        Higher TF bar closes update tf_arrays but don't trigger evaluation
+        directly — strategies evaluate at M1 cadence.
+        """
+        from core.candle_stream import Bar
+
+        bar = Bar(
+            timestamp=event.timestamp,
+            open=event.open, high=event.high,
+            low=event.low, close=event.close,
+            volume=event.volume,
+        )
+
+        if event.timeframe == "M1":
+            if self._m1_arrays is None:
+                return
+            self._m1_arrays.append(bar)
+            if self._m1_arrays.n == 0:
+                return
+            i = self._m1_arrays.n - 1
+            signals = self.evaluate(i, self._m1_arrays, self._tf_arrays)
+            for sig in signals:
+                if self._bus:
+                    self._bus.publish(sig)
+        else:
+            # Higher TF bar — append to tf_arrays for strategy window lookups
+            if event.timeframe in self._tf_arrays:
+                self._tf_arrays[event.timeframe].append(bar)
 
     def precompute(self, arrays, tf_arrays: dict) -> None:
         """Pre-compute indicators for all strategies."""
