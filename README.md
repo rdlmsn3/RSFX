@@ -1,8 +1,8 @@
 # RSFX — Forex Market Replay & Strategy Research Platform
 
-Event-driven market replay with 72+ strategies, backtesting, correlation analysis, portfolio optimization, confluence trading, support/resistance detection, and a web UI.
+Tick-driven event-driven market replay with 72+ strategies, backtesting, correlation analysis, portfolio optimization, confluence trading, support/resistance detection, and a web UI.
 
-> **Unified Engine Architecture:** All UIs (Streamlit, CLI, FastAPI) share a single `SignalEngine` + `TradeEngine` for consistent signal evaluation and trade execution.
+> **Unified Engine Architecture:** All UIs (Streamlit, CLI, FastAPI) share a single `EventBus` + `CandleStream` + `SignalEngine` + `TickEngine`. Ticks are the only clock. Bars are derived views emitted as events.
 
 ---
 
@@ -44,49 +44,36 @@ python3 -m backtest --help
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     DATA LAYER                                  │
-│                                                                 │
-│  CSV / Parquet (M1 bars or tick data)                           │
-│        ↓                                                        │
-│  get_adapter()  →  HistDataAdapter | ParquetAdapter             │
-│        ↓                                                        │
-│  TickCandleBuilder (if tick data)  →  M1 bars + raw ticks       │
-│        ↓                                                        │
-│  MarketDataStore  ←  pre-computes M1 → M5, H1, D1 at load      │
-└────────────────────────────┬────────────────────────────────────┘
+                          EventBus
                              │
-┌────────────────────────────▼────────────────────────────────────┐
-│                     ENGINE LAYER (core/)                         │
-│                                                                 │
-│  SignalEngine.evaluate()                                        │
-│    ├── runs 72 strategies via StrategyRegistry                  │
-│    ├── confluence buffer (lookback window, threshold)           │
-│    ├── compute_tp_sl() ATR fallback when strategies return 0   │
-│    └── outputs → [SignalEvent]                                  │
-│                             │                                   │
-│  TradeEngine.open(signal)   │                                   │
-│    ├── check_min_rr()       │  ← core/engine.py                 │
-│    ├── check_dedup()        │  ← core/engine.py                 │
-│    ├── applies spread cost  │                                   │
-│    └── on_bar() → TradeRecord + equity curve                    │
-│                             │                                   │
-│  TradeStore (SQLite)        │  ← persists runs + trades         │
-└────────────────────────────┬────────────────────────────────────┘
-                             │
-┌────────────────────────────▼────────────────────────────────────┐
-│                     UI LAYER (ui/)                               │
-│                                                                 │
-│  ┌──────────┐  ┌──────────────┐  ┌─────────────────────┐       │
-│  │  CLI     │  │ FastAPI Web  │  │ Streamlit Replay    │       │
-│  │ cli.py   │  │ server.py    │  │ app.py              │       │
-│  │→ engine  │  │ → engine     │  │ → engine            │       │
-│  │→ stdout  │  │ → JSON       │  │ → charts + controls │       │
-│  └──────────┘  └──────────────┘  └─────────────────────┘       │
-└─────────────────────────────────────────────────────────────────┘
+Tick Source ────────────► CandleStream
+(file / WebSocket)        │  ingests tick
+                          │  If M1/M5/H1 boundary → publish(BarEvent)
+                          │
+              ┌───────────┤
+              │           │
+         SignalEngine  TradeEngine
+         (subscribed)  (subscribed)
+         on BarEvent        │
+              │             │
+              │  SignalEvent
+              └──────►──────┘
+                    queue_order()
+
+Next tick ──────────► TradeEngine.on_tick()
+                      fills pending, checks SL/TP
 ```
 
-**Key principle:** No component holds a direct reference to any other. All three UIs are thin wrappers that call `SignalEngine` + `TradeEngine` from `core/`.
+**Key principle:** Two call patterns coexist:
+1. **Direct** (every tick): `trade_engine.on_tick(bid, ask, ts)` — manages positions
+2. **EventBus** (candle close): CandleStream → BarEvent → SignalEngine → SignalEvent → TradeEngine.queue_order()
+
+The tick loop in every UI is just two lines:
+```python
+for tick in tick_source:
+    trade_engine.on_tick(bid, ask, ts)
+    candle_stream.ingest_tick(ts, bid, ask, vol)  # EventBus handles the rest
+```
 
 ---
 
@@ -96,8 +83,9 @@ python3 -m backtest --help
 RSFX/
 ├── core/                           # SHARED ENGINE LAYER
 │   ├── engine.py                   # CandleArrays + trading math (TP/SL, PnL, equity, stats)
-│   ├── trade_engine.py             # Unified bar/tick trade executor
-│   ├── signal_engine.py            # Strategy evaluation + confluence buffer + ATR TP/SL
+│   ├── candle_stream.py            # IncrementalCandleBuilder + StreamingCandleArrays (EventBus)
+│   ├── trade_engine.py             # Tick-only trade executor (EventBus SignalEvent subscriber)
+│   ├── signal_engine.py            # Strategy evaluation + EventBus BarEvent subscriber
 │   ├── trade_store.py              # SQLite persistence (runs + trades)
 │   ├── data_loader.py              # Adapter-pattern loaders: CSV + Parquet (auto-detect)
 │   ├── tick_candle_builder.py      # Tick → M1 OHLCV aggregation (midprice)
@@ -308,18 +296,21 @@ signals = engine.evaluate(i, arrays, tf_arrays)
 # → list[SignalEvent] with confluence buffer + ATR TP/SL fallback
 ```
 
-### `core/trade_engine.py` — Trade Lifecycle
+### `core/trade_engine.py` — Trade Lifecycle (Tick-Driven)
 
 ```python
 from core.trade_engine import TradeEngine, TradeConfig
+from core.event_bus import EventBus
 
+bus = EventBus()
 config = TradeConfig(symbol="USDJPY", spread_pips=0.5, min_rr=1.0, lot_size=0.01, initial_balance=10000)
-engine = TradeEngine(config)
+engine = TradeEngine(config, event_bus=bus)
 
-engine.open(signal)      # → opens position with TP/SL
-engine.on_bar(bar_event) # → checks TP/SL hits, updates equity
-trades = engine.trades   # → list[TradeRecord]
-stats = engine.get_stats()  # → dict with win_rate, PF, etc.
+engine.queue_order(signal)           # → stores PendingOrder with risk/reward distances
+engine.on_tick(bid, ask, ts)        # → fills pending at next tick, checks SL/TP
+engine.mark_to_market(close)        # → equity curve only (no execution)
+trades = engine.trades              # → list[TradeRecord]
+stats = engine.get_stats()          # → dict with win_rate, PF, etc.
 ```
 
 ---
@@ -442,8 +433,11 @@ Place in `detectors/strategies/` — auto-discovered by the registry.
 | PatternDetector (pluggable strategies) | ✅ |
 | Support/Resistance detection (ATR-adaptive) | ✅ |
 | core/engine.py — CandleArrays + all trading math | ✅ |
-| Unified TradeEngine (bar + tick) | ✅ |
-| Unified SignalEngine (confluence + ATR TP/SL fallback) | ✅ |
+| CandleStream (IncrementalCandleBuilder + StreamingCandleArrays) | ✅ |
+| EventBus-driven tick loop (CandleStream → SignalEngine → TradeEngine) | ✅ |
+| TradeEngine (tick-only, queue_order + on_tick) | ✅ |
+| SignalEngine (BarEvent subscriber + confluence) | ✅ |
+| Live-ready architecture (same loop for backtest + live feed) | ✅ |
 | CLI backtester (ui/cli.py) | ✅ |
 | FastAPI web UI (ui/backtest/server.py) | ✅ |
 | Streamlit replay UI (ui/streamlit_app/app.py) | ✅ |
@@ -476,4 +470,4 @@ Place in `detectors/strategies/` — auto-discovered by the registry.
 | Performance Analytics | Medium | Sharpe, Sortino, Calmar, equity curve analysis |
 | Journal System | Medium | Trade journal with notes, screenshots, tags |
 | Secondary symbol feeds | Low | DXY, Gold, Oil as context for strategy decisions |
-| Live trading mode | Low | Paper trading → real execution |
+| Live trading mode | High | Paper trading → real execution (EventBus ready) |
