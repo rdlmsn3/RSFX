@@ -33,9 +33,9 @@ Branch `pre-tick-driven-refactor` pushed. Current work on `tick-driven-refactor`
 
 ### Replaced:
 - `core/trade_engine.py` — bar+tick dual mode → tick-only (queue_order + on_tick)
-- `ui/cli.py` backtest loop — bar loop → tick loop
-- `ui/backtest/server.py` backtest loop — bar loop → tick loop
-- `ui/streamlit_app/app.py` backtest loop — bar loop → tick loop
+- `ui/cli.py` backtest loop — bar loop → inline tick loop
+- `ui/backtest/server.py` backtest loop — bar loop → inline tick loop
+- `ui/streamlit_app/app.py` backtest loop — bar loop → inline tick loop + live-ready
 
 ### New file:
 - `core/candle_stream.py` — IncrementalCandleBuilder + StreamingCandleArrays
@@ -164,120 +164,95 @@ git commit -m "refactor: replace bar+tick TradeEngine with tick-only execution"
 ```
 
 ---
+## Task 3: Rewrite CLI Backtest Loop — Tick-Driven
 
-## Task 3: Create `core/run_backtest.py` — Tick-Driven Backtest Loop
-
-**Objective:** New backtest entry point that streams ticks one at a time.
-
-**Files:**
-- Create: `core/run_backtest.py` (from `core/new_run_backtest_tick_driven.py`)
-
-**Content:** Copy `core/new_run_backtest_tick_driven.py` → `core/run_backtest.py`. Adapt imports:
-- `from core.candle_stream import ...`
-- `from core.trade_engine import ...`
-- `from core.signal_engine import ...`
-- `from detectors.strategies.registry import ...`
-
-The loop:
-```python
-for ts, row in raw_ticks.iterrows():
-    bid, ask, vol = float(row['bid']), float(row['ask']), float(row.get('volume', 0.0))
-    
-    # 1) Manage position / fill queue — always first
-    engine.on_tick(bid, ask, ts)
-    
-    # 2) Feed higher TF builders
-    for tf, builder in tf_builders.items():
-        bar = builder.ingest_tick(ts, bid, ask, vol)
-        if bar: tf_arrays[tf].append(bar)
-    
-    # 3) M1 boundary → evaluate signals → queue
-    bar = m1_builder.ingest_tick(ts, bid, ask, vol)
-    if bar is None: continue
-    m1_arrays.append(bar)
-    engine.mark_to_market(bar.close)
-    
-    # Optional: refresh precompute every N candles
-    candles_seen += 1
-    if precompute_refresh_every and candles_seen % precompute_refresh_every == 0:
-        signal_engine.precompute(m1_arrays, tf_arrays)
-    
-    i = m1_arrays.n - 1
-    signals = signal_engine.evaluate(i, m1_arrays, tf_arrays)
-    for sig in signals:
-        engine.queue_order(sig)
-```
-
-**Verification:**
-```bash
-cd /home/rudi/RSFX && /usr/bin/python3 -c "
-from core.run_backtest import run_tick_backtest
-from core.trade_engine import TradeConfig
-from core.data_loader import get_adapter
-import pandas as pd
-
-adapter = get_adapter('data/DAT_ASCII_USDJPY_M1_202605.csv')
-m1_df = adapter.load('data/DAT_ASCII_USDJPY_M1_202605.csv')
-
-# Build raw ticks from the adapter if available, or use the M1 data as-is
-# For this test, use the CSV tick data if available
-print(f'Loaded {len(m1_df)} candles')
-print('run_tick_backtest function exists and imports OK')
-"
-```
-
-**Commit:**
-```bash
-git add core/run_backtest.py
-git commit -m "feat: add tick-driven backtest loop (run_backtest.py)"
-```
-
----
-
-## Task 4: Rewrite CLI Backtest Loop
-
-**Objective:** Change `ui/cli.py` backtest loop from bar-driven to tick-driven.
+**Objective:** Replace `ui/cli.py` bar-driven loop with inline tick-driven loop.
 
 **Files:**
 - Modify: `ui/cli.py`
 
-**Changes:**
-1. Replace `run_single_backtest()` body with tick-driven loop using `run_tick_backtest()` from `core/run_backtest.py`
-2. Remove direct `CandleArrays` construction and bar loop
-3. Load tick data via adapter, call `run_tick_backtest(raw_ticks, strategies, config, lookback, threshold)`
-4. Display results from the returned `TradeEngine`
+**Key changes:**
+1. Remove `CandleArrays.from_dataframe()` and bar loop entirely
+2. Load tick data via adapter (`adapter.raw_ticks`) — reject if None
+3. Inline the tick-driven loop (same pattern as `new_run_backtest_tick_driven.py`)
+4. No `open()` → use `queue_order()` after signal evaluation
+5. No `on_bar()` → use `on_tick()` + `mark_to_market()`
+6. Display results from `engine.get_stats()`
 
-**New `run_single_backtest()` body (simplified):**
+**Tick-driven loop embedded in `run_single_backtest()`:**
 ```python
+from core.candle_stream import IncrementalCandleBuilder, StreamingCandleArrays
+from core.trade_engine import TradeConfig, TradeEngine
+from core.signal_engine import SignalEngine
+
 def run_single_backtest(strategies, args, csv_path, adapter, run_number=None, total_runs=None):
+    # --- Validate tick data ---
+    if not hasattr(adapter, 'raw_ticks') or adapter.raw_ticks is None:
+        raise ValueError(f"No tick data (bid/ask) in {csv_path}. Only tick files supported.")
+    raw_ticks = adapter.raw_ticks
+
     config = TradeConfig(
         symbol=args.symbol, pip_value=0.01, lot_size=args.lot_size,
         initial_balance=args.balance, spread_pips=args.spread, min_rr=args.min_rr,
     )
-    
-    # Get raw ticks
-    raw_ticks = _get_raw_ticks(adapter, csv_path)
-    
-    engine = run_tick_backtest(
-        raw_ticks=raw_ticks,
-        strategy_names=strategies,
-        trade_config=config,
-        lookback=args.lookback,
-        threshold=args.threshold,
-    )
-    
-    # Print stats from engine.get_stats()
-    stats = engine.get_stats()
-    # ... print same format as before
-```
+    signal_engine = SignalEngine(strategy_names=strategies, lookback=args.lookback, threshold=args.threshold)
+    trade_engine = TradeEngine(config)
 
-**Helper `_get_raw_ticks()`:**
-```python
-def _get_raw_ticks(adapter, csv_path):
-    """Get raw tick DataFrame from adapter. Ticks only — rejects bar data."""
-    if hasattr(adapter, 'raw_ticks') and adapter.raw_ticks is not None:
-        return adapter.raw_ticks
-    raise ValueError(f"No tick data (bid/ask) found in {csv_path}. Only tick files supported.")
+    # --- Incremental candle builders ---
+    from detectors.strategies.registry import STRATEGY_REGISTRY, _populate_registry
+    _populate_registry()
+    needed_tfs = set()
+    for name in strategies:
+        needed_tfs.update(STRATEGY_REGISTRY[name]["timeframes"])
+    needed_tfs.discard("M1")
+
+    m1_builder = IncrementalCandleBuilder("M1")
+    m1_arrays = StreamingCandleArrays()
+    tf_builders = {tf: IncrementalCandleBuilder(tf) for tf in needed_tfs}
+    tf_arrays = {tf: StreamingCandleArrays() for tf in needed_tfs}
+
+    # --- Tick loop ---
+    candles_seen = 0
+    t0 = time.perf_counter()
+
+    for ts, row in raw_ticks.iterrows():
+        bid, ask, vol = float(row["bid"]), float(row["ask"]), float(row.get("volume", 0.0))
+
+        # 1) Manage position / fill queue — always first
+        trade_engine.on_tick(bid, ask, ts)
+
+        # 2) Feed higher TF builders
+        for tf, builder in tf_builders.items():
+            bar = builder.ingest_tick(ts, bid, ask, vol)
+            if bar: tf_arrays[tf].append(bar)
+
+        # 3) M1 boundary → evaluate signals → queue
+        bar = m1_builder.ingest_tick(ts, bid, ask, vol)
+        if bar is None:
+            continue
+        m1_arrays.append(bar)
+        trade_engine.mark_to_market(bar.close)
+        candles_seen += 1
+
+        if candles_seen % 500 == 0:
+            signal_engine.precompute(m1_arrays, tf_arrays)
+
+        i = m1_arrays.n - 1
+        signals = signal_engine.evaluate(i, m1_arrays, tf_arrays)
+        for sig in signals:
+            trade_engine.queue_order(sig)
+
+    # Force close at end
+    if trade_engine.open_position:
+        last_bid, last_ask = float(raw_ticks.iloc[-1]["bid"]), float(raw_ticks.iloc[-1]["ask"])
+        last_price = last_bid if trade_engine.open_position.direction == "LONG" else last_ask
+        trade_engine.force_close(last_price, raw_ticks.index[-1], "EOD")
+
+    # Print stats
+    stats = trade_engine.get_stats()
+    elapsed = time.perf_counter() - t0
+    # ... print same format as before
+    return stats
 ```
 
 **Verification:**
@@ -294,37 +269,65 @@ git commit -m "refactor: CLI backtest loop switched to tick-driven execution"
 
 ---
 
-## Task 5: Rewrite FastAPI Backtest Loop
+## Task 4: Rewrite FastAPI Backtest Loop — Tick-Driven
 
-**Objective:** Change `ui/backtest/server.py` `/run` endpoint from bar-driven to tick-driven.
+**Objective:** Replace `ui/backtest/server.py` `/run` endpoint bar loop with inline tick-driven loop.
 
 **Files:**
 - Modify: `ui/backtest/server.py`
 
-**Changes in `/run` endpoint:**
-```python
-# OLD:
-# arrays = CandleArrays.from_dataframe(m1_df)
-# for i in range(max_start, arrays.n):
-#     signals = signal_engine.evaluate(i, arrays, tf_arrays)
-#     for sig in signals: trade_engine.open(sig)
-#     bar_event = BarEvent(...)
-#     trade_engine.on_bar(bar_event)
+**Key changes:**
+1. Remove `CandleArrays.from_dataframe()` and bar loop
+2. Get `raw_ticks` from `get_store()` (already cached there)
+3. Inline tick-driven loop in `/run` endpoint
+4. No `open()` → `queue_order()`, no `on_bar()` → `on_tick()` + `mark_to_market()`
+5. Update `bars_held` → `ticks_held` in extended stats
 
-# NEW:
-from core.run_backtest import run_tick_backtest
-engine = run_tick_backtest(
-    raw_ticks=raw_ticks,
-    strategy_names=req.strategies,
-    trade_config=config,
-    lookback=req.lookback,
-    threshold=req.threshold,
-)
+**Tick-driven loop in `/run` endpoint:**
+```python
+from core.candle_stream import IncrementalCandleBuilder, StreamingCandleArrays
+
+# ... (config, signal_engine, trade_engine setup same as before) ...
+
+m1_builder = IncrementalCandleBuilder("M1")
+m1_arrays = StreamingCandleArrays()
+tf_builders = {tf: IncrementalCandleBuilder(tf) for tf in needed_tfs}
+tf_arrays_stream = {tf: StreamingCandleArrays() for tf in needed_tfs}
+
+candles_seen = 0
+for ts, row in raw_ticks.iterrows():
+    bid, ask, vol = float(row["bid"]), float(row["ask"]), float(row.get("volume", 0.0))
+    trade_engine.on_tick(bid, ask, ts)
+
+    for tf, builder in tf_builders.items():
+        bar = builder.ingest_tick(ts, bid, ask, vol)
+        if bar: tf_arrays_stream[tf].append(bar)
+
+    bar = m1_builder.ingest_tick(ts, bid, ask, vol)
+    if bar is None: continue
+    m1_arrays.append(bar)
+    trade_engine.mark_to_market(bar.close)
+    candles_seen += 1
+
+    if candles_seen % 500 == 0:
+        signal_engine.precompute(m1_arrays, tf_arrays_stream)
+
+    i = m1_arrays.n - 1
+    signals = signal_engine.evaluate(i, m1_arrays, tf_arrays_stream)
+    for sig in signals:
+        trade_engine.queue_order(sig)
+
+# Force close at end
+if trade_engine.open_position:
+    last_bid = float(raw_ticks.iloc[-1]["bid"])
+    last_ask = float(raw_ticks.iloc[-1]["ask"])
+    lp = last_bid if trade_engine.open_position.direction == "LONG" else last_ask
+    trade_engine.force_close(lp, raw_ticks.index[-1], "EOD")
 ```
 
-Also update:
-- `result["avg_bars_held"]` → `result["avg_ticks_held"]` (or keep as bars for UI compatibility by converting)
+**Also update:**
 - `durations = [t.bars_held for t in trades]` → `durations = [t.ticks_held for t in trades]`
+- `result["avg_bars_held"]` → `result["avg_ticks_held"]`
 
 **Verification:**
 ```bash
@@ -348,92 +351,125 @@ git commit -m "refactor: FastAPI backtest loop switched to tick-driven execution
 
 ---
 
-## Task 6: Rewrite Streamlit Backtest Loop
+## Task 5: Rewrite Streamlit — Tick-Driven + Live-Ready
 
-**Objective:** Change `ui/streamlit_app/app.py` `_run_backtest()` from bar-driven to tick-driven.
+**Objective:** Replace Streamlit backtest loop with tick-driven execution, and design the tick loop to accept a live tick stream later.
 
 **Files:**
 - Modify: `ui/streamlit_app/app.py`
 
-**Changes in `_run_backtest()`:**
-```python
-# OLD:
-# arrays = CandleArrays.from_dataframe(m1_df)
-# for i in range(max_start, arrays.n):
-#     signals = signal_engine.evaluate(i, arrays, tf_arrays)
-#     for sig in signals: trade_engine.open(sig)
-#     bar_event = BarEvent(...)
-#     trade_engine.on_bar(bar_event)
+**Design principle:** The tick loop is a generator-friendly pattern. For backtest: iterate `raw_ticks.iterrows()`. For live: iterate an async tick feed (WebSocket, MT5 stream, etc.) — same `on_tick()` + `ingest_tick()` calls.
 
-# NEW:
-from core.run_backtest import run_tick_backtest
-# Load raw ticks from adapter
-raw_ticks = _get_raw_ticks(adapter, csv_path)
-engine = run_tick_backtest(
-    raw_ticks=raw_ticks,
-    strategy_names=strategy_names,
-    trade_config=config,
-    lookback=lookback,
-    threshold=threshold,
-)
-```
+**Key changes:**
+1. Remove `CandleArrays.from_dataframe()` and bar loop
+2. Load tick data via adapter — reject if None
+3. Inline tick-driven loop with `signals_timeline` collection for chart rendering
+4. No `open()` → `queue_order()`, no `on_bar()` → `on_tick()` + `mark_to_market()`
+5. Store `m1_arrays` (StreamingCandleArrays) in session state for replay
+6. Structure tick processing as a callable `_process_tick()` helper — same function works for backtest iteration AND future live feed
 
-Also update `signals_timeline` collection — signals now come from the tick-driven loop. The `run_tick_backtest` function should optionally return signals. Or we adapt the Streamlit `_run_backtest` to wrap the tick loop and collect signals inline.
-
-**Approach:** For Streamlit, inline the tick loop (not using `run_tick_backtest`) so we can collect `signals_timeline` for chart rendering:
+**Tick-driven loop in `_run_backtest()`:**
 ```python
 from core.candle_stream import IncrementalCandleBuilder, StreamingCandleArrays
 
+# --- Setup builders ---
 m1_builder = IncrementalCandleBuilder("M1")
 m1_arrays = StreamingCandleArrays()
 tf_builders = {tf: IncrementalCandleBuilder(tf) for tf in needed_tfs}
 tf_arrays = {tf: StreamingCandleArrays() for tf in needed_tfs}
 
 candles_seen = 0
+signals_timeline = []
+
 for ts, row in raw_ticks.iterrows():
-    bid, ask, vol = float(row['bid']), float(row['ask']), float(row.get('volume', 0.0))
+    bid, ask, vol = float(row["bid"]), float(row["ask"]), float(row.get("volume", 0.0))
     trade_engine.on_tick(bid, ask, ts)
-    
+
     for tf, builder in tf_builders.items():
         bar = builder.ingest_tick(ts, bid, ask, vol)
         if bar: tf_arrays[tf].append(bar)
-    
+
     bar = m1_builder.ingest_tick(ts, bid, ask, vol)
     if bar is None: continue
     m1_arrays.append(bar)
     trade_engine.mark_to_market(bar.close)
     candles_seen += 1
-    
+
     if candles_seen % 500 == 0:
-        signal_engine.precompute(m1_arrays, {tf: a for tf, a in tf_arrays.items()})
-    
+        signal_engine.precompute(m1_arrays, tf_arrays)
+
     i = m1_arrays.n - 1
     signals = signal_engine.evaluate(i, m1_arrays, tf_arrays)
     for sig in signals:
         trade_engine.queue_order(sig)
         signals_timeline.append((candles_seen, sig))
+
+# Force close at end
+if trade_engine.open_position:
+    last_bid = float(raw_ticks.iloc[-1]["bid"])
+    last_ask = float(raw_ticks.iloc[-1]["ask"])
+    lp = last_bid if trade_engine.open_position.direction == "LONG" else last_ask
+    trade_engine.force_close(lp, raw_ticks.index[-1], "EOD")
+
+# Store results in session state
+st.session_state.arrays = m1_arrays
+st.session_state.tf_arrays = tf_arrays
+st.session_state.signals_timeline = signals_timeline
+st.session_state.trades_completed = list(trade_engine.trades)
+```
+
+**Live-ready design:** Extract tick processing into a helper that works for both backtest and live:
+```python
+def _process_tick(trade_engine, signal_engine, m1_builder, m1_arrays,
+                  tf_builders, tf_arrays, bid, ask, vol, ts, candles_seen):
+    """Process a single tick — works for backtest (historical) and live (streaming)."""
+    trade_engine.on_tick(bid, ask, ts)
+
+    for tf, builder in tf_builders.items():
+        bar = builder.ingest_tick(ts, bid, ask, vol)
+        if bar: tf_arrays[tf].append(bar)
+
+    bar = m1_builder.ingest_tick(ts, bid, ask, vol)
+    if bar is None:
+        return candles_seen, []
+
+    m1_arrays.append(bar)
+    trade_engine.mark_to_market(bar.close)
+    candles_seen += 1
+
+    if candles_seen % 500 == 0:
+        signal_engine.precompute(m1_arrays, tf_arrays)
+
+    i = m1_arrays.n - 1
+    signals = signal_engine.evaluate(i, m1_arrays, tf_arrays)
+    for sig in signals:
+        trade_engine.queue_order(sig)
+
+    return candles_seen, signals
 ```
 
 **Also update:**
 - Store `m1_arrays` as `arrays` in session state for chart rendering
 - `TradeRecord.bars_held` → `ticks_held` in any display code
+- Keep `_signal_to_pattern()` working with new signal indices
+```
 
 **Verification:**
 ```bash
 cd /home/rudi/RSFX && streamlit run ui/streamlit_app/app.py
 # Open http://localhost:8501
-# Load a CSV, select a strategy, verify backtest runs and charts render
+# Load a CSV tick file, select a strategy, verify backtest runs and charts render
 ```
 
 **Commit:**
 ```bash
 git add ui/streamlit_app/app.py
-git commit -m "refactor: Streamlit backtest loop switched to tick-driven execution"
-```
+git commit -m "refactor: Streamlit tick-driven + live-ready architecture"
+
 
 ---
 
-## Task 7: Update `README.md`
+## Task 6: Update `README.md`
 
 **Objective:** Update architecture docs to reflect tick-driven system.
 
@@ -443,7 +479,7 @@ git commit -m "refactor: Streamlit backtest loop switched to tick-driven executi
 **Changes:**
 - Architecture diagram: tick stream → IncrementalCandleBuilder → M1 bars → SignalEngine
 - TradeEngine description: `queue_order()` + `on_tick()` instead of `open()` + `on_bar()`
-- Folder structure: add `core/candle_stream.py`, `core/run_backtest.py`
+- Folder structure: add `core/candle_stream.py`
 - "What's Done" table: update TradeEngine description
 - "What's Next": remove tick-driven items
 
@@ -455,7 +491,7 @@ git commit -m "docs: update README for tick-driven architecture"
 
 ---
 
-## Task 8: Run Full Test Suite
+## Task 7: Run Full Test Suite
 
 **Objective:** Verify nothing is broken.
 
@@ -468,7 +504,7 @@ cd /home/rudi/RSFX
 from core.candle_stream import IncrementalCandleBuilder, StreamingCandleArrays
 from core.trade_engine import TradeEngine, TradeConfig, TradeRecord
 from core.signal_engine import SignalEngine
-from core.run_backtest import run_tick_backtest
+from core.candle_stream import IncrementalCandleBuilder, StreamingCandleArrays
 print('All imports OK')
 "
 
