@@ -1,6 +1,6 @@
 # Backtest results (generated CSVs)
 results/
-
+analysis_result/
 # Legacy root-level results (pre-restructure)
 backtest_results*.csv
 backtest_trades*.csv
