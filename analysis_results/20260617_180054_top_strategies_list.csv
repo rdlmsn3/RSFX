@@ -1,0 +1,16 @@
+,Rank,Strategy
+0,1,ema_ribbon_pullback
+1,2,tweezer_reversal
+2,3,marubozu_trend
+3,4,h1_trend_m5_rsi
+4,5,heikin_ashi_ema
+5,6,donchian_rsi
+6,7,momentum_exhaustion
+7,8,engulfing_ema
+8,9,ichimoku_cloud_break
+9,10,keltner_rsi
+10,11,ma_ribbon_pullback
+11,12,three_bar_reversal
+12,13,ichimoku_cloud_bounce
+13,14,breakout_retest
+14,15,cci_ema

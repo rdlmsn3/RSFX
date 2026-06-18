@@ -1,0 +1,10 @@
+,Strategy 1,Strategy 2,Correlation
+3,ema_macd_rsi_confluence,triple_confirm,0.98
+0,breakout_retest,donchian_rsi,0.787
+4,ema_ribbon_pullback,ma_ribbon_pullback,0.763
+7,ma_ribbon_pullback,triple_confirm,0.753
+1,ema_macd_rsi_confluence,ma_ribbon_pullback,0.742
+8,trend_momentum_vol,triple_confirm,0.742
+2,ema_macd_rsi_confluence,trend_momentum_vol,0.725
+6,ichimoku_cloud_bounce,ma_ribbon_pullback,0.719
+5,h1_adx_m5_ema,h1_trend_m5_ema_cross,0.709

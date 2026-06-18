@@ -187,7 +187,8 @@ async def run_backtest(req: BacktestRequest):
 
         # Pre-compute indicators
         signal_engine.precompute(arrays, tf_arrays)
-
+        
+        trade_engine.attach_ticks(raw_ticks)
         # Run the backtest loop
         t0 = time.perf_counter()
         max_start = max(req.lookback, 100)

@@ -1,0 +1,5 @@
+,Strategy,Portfolio,Total PnL,Avg Win Rate,Avg Correlation
+0,ema_ribbon_pullback,ema_ribbon_pullback + tweezer_reversal + marubozu_trend + h1_trend_m5_rsi,14855.6,59.5,0.174
+1,tweezer_reversal,ema_ribbon_pullback + tweezer_reversal + marubozu_trend + h1_trend_m5_rsi,14855.6,59.5,0.174
+2,marubozu_trend,ema_ribbon_pullback + tweezer_reversal + marubozu_trend + h1_trend_m5_rsi,14855.6,59.5,0.174
+3,h1_trend_m5_rsi,ema_ribbon_pullback + tweezer_reversal + marubozu_trend + h1_trend_m5_rsi,14855.6,59.5,0.174

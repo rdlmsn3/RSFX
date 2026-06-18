@@ -229,7 +229,7 @@ def update_equity(
     unreal = 0.0
     if open_price is not None:
         unreal = compute_pnl(direction, open_price, current_close, pip_value)
-    bal = initial_balance + (realized_pnl_pips + unreal) * lot_size * 100
+    bal = initial_balance + (realized_pnl_pips + unreal) * lot_size * 100_000 * pip_value
     balance_curve.append(bal)
     peak_balance = max(peak_balance, bal)
     if peak_balance > 0:

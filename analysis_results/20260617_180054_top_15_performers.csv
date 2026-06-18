@@ -1,0 +1,16 @@
+,strategy,Trades,Total PnL,Avg PnL,Win Rate
+0,ema_ribbon_pullback,5571,4952.95,0.89,56.3
+1,tweezer_reversal,3919,4287.03,1.09,59.3
+2,marubozu_trend,2216,3281.52,1.48,63.7
+3,h1_trend_m5_rsi,1945,2334.06,1.2,58.7
+4,heikin_ashi_ema,2475,2144.96,0.87,55.4
+5,donchian_rsi,2315,2125.2,0.92,56.9
+6,momentum_exhaustion,1496,2093.18,1.4,62.6
+7,engulfing_ema,1302,1834.55,1.41,62.1
+8,ichimoku_cloud_break,1489,1727.56,1.16,60.2
+9,keltner_rsi,1795,1613.99,0.9,56.3
+10,ma_ribbon_pullback,7234,1316.96,0.18,46.4
+11,three_bar_reversal,4876,1291.9,0.26,47.5
+12,ichimoku_cloud_bounce,6898,1280.04,0.19,46.3
+13,breakout_retest,2994,1263.77,0.42,50.7
+14,cci_ema,1702,1164.11,0.68,53.0

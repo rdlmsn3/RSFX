@@ -285,7 +285,8 @@ def _run_backtest() -> bool:
 
             # Pre-compute indicators
             signal_engine.precompute(arrays, tf_arrays)
-
+            if hasattr(adapter, "raw_ticks") and adapter.raw_ticks is not None:
+                trade_engine.attach_ticks(adapter.raw_ticks)
             # Run backtest loop
             max_start = max(lookback, 100)
             signals_timeline: list[tuple[int, SignalEvent]] = []

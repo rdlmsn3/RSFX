@@ -1,0 +1,21 @@
+,Strategies,Count,Avg Correlation,Total PnL,Avg Win Rate,Score
+560,ema_ribbon_pullback + tweezer_reversal + marubozu_trend + h1_trend_m5_rsi,4,0.174,14855.6,59.5,13560.5
+574,ema_ribbon_pullback + tweezer_reversal + h1_trend_m5_rsi + momentum_exhaustion,4,0.149,13667.2,59.2,12648.3
+572,ema_ribbon_pullback + tweezer_reversal + h1_trend_m5_rsi + heikin_ashi_ema,4,0.173,13719.0,57.4,12535.4
+573,ema_ribbon_pullback + tweezer_reversal + h1_trend_m5_rsi + donchian_rsi,4,0.179,13699.2,57.8,12472.5
+575,ema_ribbon_pullback + tweezer_reversal + h1_trend_m5_rsi + engulfing_ema,4,0.172,13408.6,59.1,12254.0
+576,ema_ribbon_pullback + tweezer_reversal + h1_trend_m5_rsi + ichimoku_cloud_break,4,0.162,13301.6,58.6,12221.8
+582,ema_ribbon_pullback + tweezer_reversal + h1_trend_m5_rsi + cci_ema,4,0.103,12738.2,56.8,12083.3
+577,ema_ribbon_pullback + tweezer_reversal + h1_trend_m5_rsi + keltner_rsi,4,0.172,13188.0,57.6,12053.7
+571,ema_ribbon_pullback + tweezer_reversal + marubozu_trend + cci_ema,4,0.245,13685.6,58.1,12008.2
+579,ema_ribbon_pullback + tweezer_reversal + h1_trend_m5_rsi + three_bar_reversal,4,0.148,12865.9,55.5,11914.2
+581,ema_ribbon_pullback + tweezer_reversal + h1_trend_m5_rsi + breakout_retest,4,0.156,12837.8,56.3,11839.5
+638,ema_ribbon_pullback + marubozu_trend + h1_trend_m5_rsi + heikin_ashi_ema,4,0.154,12713.5,58.5,11731.9
+563,ema_ribbon_pullback + tweezer_reversal + marubozu_trend + momentum_exhaustion,4,0.395,14614.7,60.4,11728.6
+561,ema_ribbon_pullback + tweezer_reversal + marubozu_trend + heikin_ashi_ema,4,0.405,14666.5,58.7,11697.4
+580,ema_ribbon_pullback + tweezer_reversal + h1_trend_m5_rsi + ichimoku_cloud_bounce,4,0.181,12854.1,55.1,11689.4
+565,ema_ribbon_pullback + tweezer_reversal + marubozu_trend + ichimoku_cloud_break,4,0.369,14249.1,59.9,11621.6
+640,ema_ribbon_pullback + marubozu_trend + h1_trend_m5_rsi + momentum_exhaustion,4,0.171,12661.7,60.3,11578.0
+562,ema_ribbon_pullback + tweezer_reversal + marubozu_trend + donchian_rsi,4,0.422,14646.7,59.0,11557.1
+639,ema_ribbon_pullback + marubozu_trend + h1_trend_m5_rsi + donchian_rsi,4,0.182,12693.7,58.9,11538.0
+564,ema_ribbon_pullback + tweezer_reversal + marubozu_trend + engulfing_ema,4,0.394,14356.0,60.3,11527.0

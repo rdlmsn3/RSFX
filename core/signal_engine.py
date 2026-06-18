@@ -223,7 +223,11 @@ class SignalEngine:
                 sl = trigger.stop_loss
                 if not tp or not sl:
                     tp, sl = compute_tp_sl(trigger.signal, arrays, i, lookback=100, use_sr=False)
-
+                # Look up the timeframes registered for the triggering strategy
+                trigger_name = trigger.strategy_name
+                strategy_timeframes = self._required_tfs.get(trigger_name, ["M1"])
+                # Use the primary timeframe (first item in list, e.g., "M5")
+                primary_tf = strategy_timeframes[0] if strategy_timeframes else "M1"
                 signal_event = SignalEvent(
                     strategy_name="+".join(sorted(set(s.strategy_name for s in agreeing))),
                     direction=conf_direction,
@@ -236,6 +240,7 @@ class SignalEngine:
                         "threshold": self._threshold,
                         "agreeing": ",".join(sorted(set(s.strategy_name for s in agreeing))),
                         "trigger_strategy": trigger.strategy_name,
+                        "timeframe": primary_tf,  # 🚀 Added dynamically!
                     },
                 )
                 signals.append(signal_event)

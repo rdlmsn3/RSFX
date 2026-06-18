@@ -1,0 +1,16 @@
+{
+  "name": "20260617_Test1",
+  "strategies": [
+    "tweezer_reversal",
+    "ema_ribbon_pullback",
+    "scalp_pullback",
+    "marubozu_trend"
+  ],
+  "use_sr": false,
+  "lookback": 5,
+  "threshold": 4,
+  "csv_file": "usdjpy_tick_2007-01_to_2007-03.parquet",
+  "symbol": "USDJPY",
+  "description": "",
+  "created": ""
+}

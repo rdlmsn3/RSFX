@@ -1,0 +1,4 @@
+,strategy,Trades,Total PnL,Avg PnL,Win Rate
+0,ema_ribbon_pullback+marubozu_trend+tweezer_reversal,1578,1708.36,1.08,62.1
+1,marubozu_trend+scalp_pullback+tweezer_reversal,2,3.01,1.5,50.0
+2,ema_ribbon_pullback+scalp_pullback+tweezer_reversal,3,-12.78,-4.26,0.0

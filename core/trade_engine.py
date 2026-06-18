@@ -31,6 +31,7 @@ import numpy as np
 import pandas as pd
 
 from core.event_bus import EventBus
+from core.engine import compute_pnl, apply_spread, check_min_rr, check_dedup, update_equity
 from core.events import (
     SignalEvent, BarEvent, TradeEvent, MarketTickEvent,
 )
@@ -140,6 +141,10 @@ class TradeEngine:
         self._realized_pnl: float = 0.0
         self._bar_idx: int = 0
         self._last_entry_price: Optional[float] = None
+        # --- TICK PRECISION FIXED ARRAYS ---
+        self._tick_ts: Optional[np.ndarray] = None
+        self._tick_bid: Optional[np.ndarray] = None
+        self._tick_ask: Optional[np.ndarray] = None
 
     @property
     def trades(self) -> list[TradeRecord]:
@@ -160,7 +165,43 @@ class TradeEngine:
     @property
     def realized_pnl_pips(self) -> float:
         return self._realized_pnl
+        
+    def attach_ticks(self, ticks: pd.DataFrame) -> None:
+            """Optional: give the engine real bid/ask for realistic entry fills.
+            Converts custom string formats ('20070102 054151000') into real datetimes."""
+            if ticks is None or ticks.empty:
+                return
 
+            # 🛡️ Fix the string timestamp format so Python can search it mathematically
+            if "timestamp" in ticks.columns:
+                ts_series = pd.to_datetime(ticks["timestamp"], format="%Y%m%d %H%M%S%f")
+            else:
+                ts_series = pd.to_datetime(ticks.index, format="%Y%m%d %H%M%S%f")
+            
+            # Store as clean, high-speed NumPy datetime arrays
+            self._tick_ts = ts_series.values
+            self._tick_bid = ticks.iloc[:, 1].values if "bid" not in ticks.columns else ticks["bid"].values
+            self._tick_ask = ticks.iloc[:, 0].values if "ask" not in ticks.columns else ticks["ask"].values
+
+    def _real_fill_price(self, direction: str, ts: pd.Timestamp, timeframe: str = "M1") -> Optional[float]:
+            """First real tick at/after the candle closes to avoid lookahead bias."""
+            if self._tick_ts is None or len(self._tick_ts) == 0:
+                return None
+            
+            # 🛡️ Dynamic Offset: Shift forward based on the timeframe that triggered it
+            minutes_to_add = 5 if timeframe == "M5" else 1
+            candle_close_time = ts + pd.Timedelta(minutes=minutes_to_add)
+        
+            target_dtype = self._tick_ts.dtype
+            lookup_target = np.datetime64(candle_close_time).astype(target_dtype)
+        
+            pos = int(np.searchsorted(self._tick_ts, lookup_target, side="left"))
+        
+            if pos >= len(self._tick_ts):
+                return None
+            
+            return float(self._tick_ask[pos]) if direction == "LONG" else float(self._tick_bid[pos])
+        
     def open(self, signal: SignalEvent) -> None:
         """Open a position from a signal event. Applies spread + slippage."""
         if self._open is not None:
@@ -171,13 +212,15 @@ class TradeEngine:
             return
 
         entry = signal.entry_price
-        if direction == "LONG":
-            entry += (self.config.spread_pips / 2 + self.config.slippage_pips) * self.config.pip_value
-        else:
-            entry -= (self.config.spread_pips / 2 + self.config.slippage_pips) * self.config.pip_value
+        strategy_tf = signal.metadata.get("timeframe", "M1")
+        # Look up true execution price if tick histories are available
+        real_fill = self._real_fill_price(direction, signal.timestamp, timeframe=strategy_tf)
+        if real_fill is not None:
+            entry = real_fill
 
         tp = signal.take_profit
         sl = signal.stop_loss
+        
         if not tp or not sl:
             return
 
@@ -192,18 +235,12 @@ class TradeEngine:
                 tp = entry - abs(tp - entry)
             if sl <= entry:
                 sl = entry + abs(sl - entry)
-
         # Dedup
-        if self._last_entry_price is not None:
-            if abs(self._last_entry_price - entry) < 1e-6:
-                return
+        if check_dedup(self._last_entry_price, entry):
+            return
 
         # Min R:R
-        risk = abs(entry - sl) / self.config.pip_value
-        reward = abs(tp - entry) / self.config.pip_value
-        if risk <= 0:
-            return
-        if (reward / risk) < self.config.min_rr:
+        if not check_min_rr(entry, tp, sl, self.config.pip_value, self.config.min_rr):
             return
 
         pos = OpenPosition(
@@ -320,13 +357,9 @@ class TradeEngine:
         pos = self._open
         assert pos is not None
 
-        if pos.direction == "LONG":
-            pnl = (exit_price - pos.entry_price) / self.config.pip_value
-        else:
-            pnl = (pos.entry_price - exit_price) / self.config.pip_value
-
-        spread_cost = self.config.spread_pips
-        net_pnl = pnl - spread_cost
+        pnl = compute_pnl(pos.direction, pos.entry_price, exit_price, self.config.pip_value)
+        spread_cost = self.config.spread_pips + self.config.slippage_pips
+        net_pnl = apply_spread(pnl, spread_cost)
 
         risk = abs(pos.entry_price - pos.stop_loss) / self.config.pip_value
         reward = abs(pos.take_profit - pos.entry_price) / self.config.pip_value
@@ -357,18 +390,17 @@ class TradeEngine:
         return trade
 
     def _update_equity(self, current_close: float) -> None:
-        unreal = 0.0
-        if self._open is not None:
-            if self._open.direction == "LONG":
-                unreal = (current_close - self._open.entry_price) / self.config.pip_value
-            else:
-                unreal = (self._open.entry_price - current_close) / self.config.pip_value
-
-        bal = self.config.initial_balance + (
-            self._realized_pnl + unreal
-        ) * self.config.lot_size * 100_000 * self.config.pip_value
-
-        self._balance_curve.append(bal)
-        self._peak_balance = max(self._peak_balance, bal)
-        if self._peak_balance > 0:
-            self._max_dd = max(self._max_dd, (self._peak_balance - bal) / self._peak_balance * 100)
+        open_price = self._open.entry_price if self._open else None
+        direction = self._open.direction if self._open else ""
+        self._balance_curve, self._peak_balance, self._max_dd = update_equity(
+            open_price=open_price,
+            direction=direction,
+            current_close=current_close,
+            realized_pnl_pips=self._realized_pnl,
+            pip_value=self.config.pip_value,
+            initial_balance=self.config.initial_balance,
+            lot_size=self.config.lot_size,
+            balance_curve=self._balance_curve,
+            peak_balance=self._peak_balance,
+            max_dd=self._max_dd,
+        )
