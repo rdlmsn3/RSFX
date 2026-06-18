@@ -274,22 +274,10 @@ def run_single_backtest(strategies, args, csv_path, adapter, run_number=None, to
 **Helper `_get_raw_ticks()`:**
 ```python
 def _get_raw_ticks(adapter, csv_path):
-    """Get raw tick DataFrame from adapter. For bar data, reconstruct ticks."""
+    """Get raw tick DataFrame from adapter. Ticks only — rejects bar data."""
     if hasattr(adapter, 'raw_ticks') and adapter.raw_ticks is not None:
         return adapter.raw_ticks
-    # Bar data: load raw CSV to get ticks, or resample
-    # Fall back: read CSV directly as tick data if bid/ask columns present
-    import pandas as pd
-    df = pd.read_csv(csv_path, header=None, names=['timestamp', 'bid', 'ask', 'volume'])
-    for fmt in ("%Y%m%d %H%M%S%f", "%Y%m%d %H%M%S"):
-        try:
-            df['timestamp'] = pd.to_datetime(df['timestamp'], format=fmt)
-            break
-        except: continue
-    df = df.set_index('timestamp').sort_index()
-    for col in ['bid', 'ask', 'volume']:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
-    return df[['bid', 'ask', 'volume']].dropna()
+    raise ValueError(f"No tick data (bid/ask) found in {csv_path}. Only tick files supported.")
 ```
 
 **Verification:**
@@ -505,7 +493,7 @@ git push -u origin tick-driven-refactor
 ## Migration Notes
 
 ### `bars_held` → `ticks_held`
-Any UI displaying `bars_held` needs to update to `ticks_held`. The FastAPI server calculates `avg_bars_held` — change to `avg_ticks_held`. Consider adding a `bars_held` computed property (ticks / ~ticks_per_bar) for backwards compatibility if needed.
+Any UI displaying `bars_held` needs to update to `ticks_held`. The FastAPI server calculates `avg_bars_held` — change to `avg_ticks_held`.
 
 ### Precompute Strategy
 With tick-driven execution, `precompute()` runs on growing arrays. Two options:
@@ -515,13 +503,10 @@ With tick-driven execution, `precompute()` runs on growing arrays. Two options:
 The `run_tick_backtest` function accepts `precompute_refresh_every` param.
 
 ### Raw Tick Data Requirement
-The tick-driven system REQUIRES raw tick data (bid/ask/volume per tick). For bar-only CSVs (HistData.com format), we need to either:
-1. Skip tick-driven mode and fall back to bar mode (existing behavior)
-2. Reconstruct synthetic ticks from bars (open/close within the bar)
-
-The plan handles this in `_get_raw_ticks()` by reading the CSV as tick data if it has bid/ask columns. For bar-only data, a synthetic tick generator could be added later.
+**Ticks only.** The tick-driven system only accepts raw tick data (bid/ask/volume per tick). Bar-only CSVs (HistData.com M1 format) are NOT supported. If the input doesn't have bid/ask columns, reject it. No synthetic tick generation.
 
 ### Compatibility
 - `StreamingCandleArrays` exposes the same attribute surface as `CandleArrays` → strategies work unchanged
 - `SignalEngine.evaluate(i, arrays, tf_arrays)` works with both `CandleArrays` and `StreamingCandleArrays`
 - All 72 strategies need zero modifications
+- CLI/FastAPI/Streamlit must validate input has tick columns (bid/ask) and reject bar-only files with a clear error
