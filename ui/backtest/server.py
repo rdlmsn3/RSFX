@@ -12,6 +12,7 @@ Then open http://localhost:8502
 """
 
 import sys
+import asyncio
 import time
 from pathlib import Path
 import pandas as pd
@@ -53,6 +54,10 @@ DATA_DIR = Path(__file__).parent.parent.parent / "data"
 
 # Cache: csv_path -> (MarketDataStore, candle_count, date_range, raw_ticks)
 _store_cache: dict[str, tuple[MarketDataStore, int, str, pd.DataFrame | None]] = {}
+
+# Progress tracking (shared between /run and /progress)
+_progress: dict = {"running": False, "pct": 0, "tick": 0, "total": 0,
+                    "candles": 0, "trades": 0, "confluences": 0, "elapsed": 0.0}
 
 
 def get_store(csv_path: str, symbol: str) -> tuple[MarketDataStore, int, pd.DataFrame | None]:
@@ -149,6 +154,9 @@ async def run_backtest(req: BacktestRequest):
         return {"error": f"Threshold {req.threshold} exceeds strategy count {len(req.strategies)}"}
 
     try:
+        _progress.update({"running": True, "pct": 0, "tick": 0, "candles": 0,
+                          "trades": 0, "confluences": 0, "elapsed": 0.0})
+
         from core.trade_engine import TradeConfig, TradeEngine
         from core.signal_engine import SignalEngine
         from core.event_bus import EventBus
@@ -201,6 +209,7 @@ async def run_backtest(req: BacktestRequest):
         # --- Tick loop: 2 lines of core logic ---
         t0 = time.perf_counter()
         candles_seen = 0
+        total_ticks = len(raw_ticks)
 
         for ts, row in raw_ticks.iterrows():
             bid, ask, vol = float(row["bid"]), float(row["ask"]), float(row.get("volume", 0.0))
@@ -212,6 +221,18 @@ async def run_backtest(req: BacktestRequest):
             if candles_seen % 500 == 0:
                 signal_engine.precompute(m1_arrays, tf_arrays_stream)
 
+            # Yield to event loop every 5000 ticks so /progress can be served
+            if candles_seen % 5000 == 0:
+                await asyncio.sleep(0)
+                _progress.update({
+                    "tick": candles_seen,
+                    "total": total_ticks,
+                    "candles": m1_arrays.n,
+                    "trades": len(trade_engine.trades),
+                    "pct": round(candles_seen / total_ticks * 100, 1),
+                    "elapsed": round(time.perf_counter() - t0, 1),
+                })
+
         # Force close any remaining open position
         if trade_engine.open_position:
             last_bid = float(raw_ticks.iloc[-1]["bid"])
@@ -219,6 +240,10 @@ async def run_backtest(req: BacktestRequest):
             lp = last_bid if trade_engine.open_position.direction == "LONG" else last_ask
             trade_engine.force_close(lp, raw_ticks.index[-1], "EOD")
         elapsed = round(time.perf_counter() - t0, 1)
+
+        # Mark progress as done
+        _progress.update({"running": False, "pct": 100, "candles": m1_arrays.n,
+                          "trades": len(trade_engine.trades), "elapsed": elapsed})
 
         trades = trade_engine.trades
 
@@ -291,8 +316,7 @@ async def run_backtest(req: BacktestRequest):
 @app.get("/progress")
 async def get_progress():
     """Return current backtest progress (polled by frontend during run)."""
-    # Simplified: no real-time progress tracking yet
-    return {"running": False, "pct": 100}
+    return _progress
 
 
 @app.get("/buckets")
