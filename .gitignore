@@ -1,33 +1,8 @@
-# Backtest results (generated CSVs)
-results/
-analysis_result/
-# Legacy root-level results (pre-restructure)
-backtest_results*.csv
-backtest_trades*.csv
-backtest_output.txt
-bt_*.csv
-confluence_*.csv
-corr_*.csv
-portfolio_*.csv
-
-# Python
 __pycache__/
 *.pyc
-*.pyo
-
-# Data (large files — keep out of git)
-data/DAT_*.csv
-data/merged_output*.csv
-data/*.parquet
-data/*.pq
-
-# SQLite databases
+.env
 *.db
-results/trades.db
-data/test_small_ticks.csv
-
-__pycache__/
-*.pyc
-a/
+data/
 test.csv
 my_output_file.csv
+a/
