@@ -309,8 +309,16 @@ def _run_backtest() -> bool:
                 signals_timeline.append((m1_arrays.n, sig))
             bus.subscribe(SignalEvent, _capture_signal)
 
-            for ts, row in raw_ticks.iterrows():
-                bid, ask, vol = float(row["bid"]), float(row["ask"]), float(row.get("volume", 0.0))
+            # Pre-extract numpy arrays for fast iteration
+            _ts_arr = raw_ticks.index.values
+            _bid_arr = raw_ticks["bid"].values.astype(float)
+            _ask_arr = raw_ticks["ask"].values.astype(float)
+            _vol_arr = raw_ticks.get("volume", pd.Series(0.0, index=raw_ticks.index)).values.astype(float)
+            _num_ticks = len(raw_ticks)
+
+            for _i in range(_num_ticks):
+                ts = pd.Timestamp(_ts_arr[_i])
+                bid, ask, vol = _bid_arr[_i], _ask_arr[_i], _vol_arr[_i]
                 trade_engine.on_tick(bid, ask, ts)
                 m1_builder.ingest_tick(ts, bid, ask, vol)
                 for builder in tf_builders.values():

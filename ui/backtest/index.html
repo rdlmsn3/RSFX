@@ -256,7 +256,7 @@
           <tr>
             <th>#</th><th>Entry Time</th><th>Dir</th><th>Entry</th><th>TP</th>
             <th>SL</th><th>Exit</th><th>PnL</th><th>MAE</th><th>MFE</th>
-            <th>Bars</th><th>Exit</th><th>Strategies</th>
+            <th>Ticks</th><th>Exit</th><th>Strategies</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -486,7 +486,7 @@ async function runBacktest() {
       if (p.running) {
         progressFill.style.width = `${p.pct}%`;
         progressText.textContent =
-          `${p.pct}% — candle ${p.candle?.toLocaleString()}/${p.total?.toLocaleString()} | ` +
+          `${p.pct}% — candle ${p.tick?.toLocaleString()}/${p.total?.toLocaleString()} | ` +
           `trades=${p.trades} | confluences=${p.confluences} | ${p.elapsed}s`;
       } else {
         progressFill.style.width = '100%';
@@ -537,7 +537,7 @@ function renderResults(data) {
     <div class="stat"><div class="val" style="color:var(--red)">${r.avg_loss_pips.toFixed(2)}</div><div class="lbl">Avg Loss</div></div>
     <div class="stat"><div class="val" style="color:var(--green)">${r.median_win_pips > 0 ? '+' : ''}${r.median_win_pips.toFixed(2)}</div><div class="lbl">Median Win</div></div>
     <div class="stat"><div class="val" style="color:var(--red)">${r.median_loss_pips.toFixed(2)}</div><div class="lbl">Median Loss</div></div>
-    <div class="stat"><div class="val">${r.avg_bars_held}</div><div class="lbl">Avg Bars Held</div></div>
+    <div class="stat"><div class="val">${r.avg_ticks_held}</div><div class="lbl">Avg Ticks Held</div></div>
     <div class="stat"><div class="val">${r.spread_pips}</div><div class="lbl">Spread (pips)</div></div>
     <div class="stat"><div class="val">${r.min_rr}:1</div><div class="lbl">Min R:R</div></div>
     <div class="stat"><div class="val">${r.expectancy_pips.toFixed(1)}</div><div class="lbl">Expectancy</div></div>
@@ -566,7 +566,7 @@ function renderResults(data) {
       <td style="color:${pnlColor}">${t.pnl_pips > 0 ? '+' : ''}${t.pnl_pips.toFixed(1)}</td>
       <td style="color:var(--red)">${t.mae_pips.toFixed(1)}</td>
       <td style="color:var(--green)">${t.mfe_pips.toFixed(1)}</td>
-      <td>${t.bars_held}</td>
+      <td>${t.ticks_held}</td>
       <td><span class="tag ${exitClass}">${t.exit_reason}</span></td>
       <td style="font-size:11px;max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${t.strategies}</td>
     </tr>`;

@@ -17,6 +17,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Optional
+import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -105,9 +106,17 @@ def run_single_backtest(
     # --- Tick loop: 2 lines of core logic ---
     candles_seen = 0
     t0 = time.perf_counter()
+    ts_arr = raw_ticks.index.values
+    bid_arr = raw_ticks['bid'].values.astype(float)
+    ask_arr = raw_ticks['ask'].values.astype(float)
+    vol_arr = raw_ticks.get('volume', pd.Series(0.0, index=raw_ticks.index)).values
+    num_ticks = len(raw_ticks)
 
-    for ts, row in raw_ticks.iterrows():
-        bid, ask, vol = float(row["bid"]), float(row["ask"]), float(row.get("volume", 0.0))
+    for i in range(num_ticks):
+        ts = pd.Timestamp(ts_arr[i])
+        bid = float(bid_arr[i])
+        ask = float(ask_arr[i])
+        vol = float(vol_arr[i])
 
         # 1) Manage positions — direct call, every tick
         trade_engine.on_tick(bid, ask, ts)
@@ -198,7 +207,7 @@ def main():
                         help="Confluence lookback window (default: 5)")
     parser.add_argument("--threshold", "-t", type=int, default=1,
                         help="Min strategies agreeing (default: 1 for single strategy)")
-    parser.add_argument("--spread", type=float, default=0.5,
+    parser.add_argument("--spread", type=float, default=0.0,
                         help="Round-trip spread in pips (default: 0.5)")
     parser.add_argument("--min-rr", type=float, default=0.0,
                         help="Minimum risk:reward ratio (default: 0.0 = no filter)")

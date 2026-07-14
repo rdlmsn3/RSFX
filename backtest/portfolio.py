@@ -110,7 +110,7 @@ class PortfolioMetrics:
     avg_win: float
     avg_loss: float
     expectancy: float
-    avg_bars_held: float
+    avg_ticks_held: float
     equity_curve_length: int
 
     def to_dict(self) -> dict:
@@ -133,7 +133,7 @@ class PortfolioMetrics:
             "avg_win": round(self.avg_win, 2),
             "avg_loss": round(self.avg_loss, 2),
             "expectancy": round(self.expectancy, 2),
-            "avg_bars_held": round(self.avg_bars_held, 1),
+            "avg_ticks_held": round(self.avg_ticks_held, 1),
             "equity_curve_length": self.equity_curve_length,
         }
 
@@ -227,7 +227,7 @@ def compute_risk_metrics(
         avg_win=avg_win,
         avg_loss=avg_loss,
         expectancy=expectancy,
-        avg_bars_held=float(ct["bars_held"].mean()),
+        avg_ticks_held=float(ct["ticks_held"].mean()),
         equity_curve_length=eq_len,
     )
 

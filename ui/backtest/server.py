@@ -210,9 +210,16 @@ async def run_backtest(req: BacktestRequest):
         t0 = time.perf_counter()
         candles_seen = 0
         total_ticks = len(raw_ticks)
+        ts_arr = raw_ticks.index.values
+        bid_arr = raw_ticks['bid'].values.astype(float)
+        ask_arr = raw_ticks['ask'].values.astype(float)
+        vol_arr = raw_ticks.get('volume', pd.Series(0.0, index=raw_ticks.index)).values
 
-        for ts, row in raw_ticks.iterrows():
-            bid, ask, vol = float(row["bid"]), float(row["ask"]), float(row.get("volume", 0.0))
+        for i in range(total_ticks):
+            ts = pd.Timestamp(ts_arr[i])
+            bid = float(bid_arr[i])
+            ask = float(ask_arr[i])
+            vol = float(vol_arr[i])
             trade_engine.on_tick(bid, ask, ts)
             m1_builder.ingest_tick(ts, bid, ask, vol)
             for builder in tf_builders.values():
@@ -271,7 +278,10 @@ async def run_backtest(req: BacktestRequest):
         result["median_win_pips"] = round(statistics.median(win_pips), 2) if win_pips else 0
         result["median_loss_pips"] = round(statistics.median(lose_pips), 2) if lose_pips else 0
         result["avg_ticks_held"] = round(statistics.mean(durations), 1) if durations else 0
-
+        # After result = trade_engine.get_stats()
+        result["winning_trades"] = len([t for t in trades if t.pnl_pips > 0])
+        result["losing_trades"] = len([t for t in trades if t.pnl_pips <= 0])
+        result["total_trades"] = len(trades)
         # Build trade list using TradeRecord.to_dict()
         trade_list = [t.to_dict() for t in trades]
 
@@ -279,7 +289,8 @@ async def run_backtest(req: BacktestRequest):
         run_id = None
         try:
             from core.trade_store import init_db, save_trades
-            db = init_db("results/trades.db")
+            #db_path = Path(__file__).parent.parent / "results" / "trades.db"
+            db = init_db()
             run_meta = {
                 "data_file": req.csv_file,
                 "symbol": req.symbol,

@@ -277,7 +277,7 @@ class SignalEngine:
                 # Use the primary timeframe (first item in list, e.g., "M5")
                 primary_tf = strategy_timeframes[0] if strategy_timeframes else "M1"
                 signal_event = SignalEvent(
-                    strategy_name="+".join(sorted(set(s.strategy_name for s in agreeing))),
+                    strategy_name=" + ".join(sorted(set(s.strategy_name for s in agreeing))),
                     direction=conf_direction,
                     entry_price=trigger.entry_price,
                     take_profit=tp,

@@ -76,15 +76,7 @@ class BaseStrategy(ABC):
     ) -> PatternSignal:
         """
         Add entry_price, stop_loss, take_profit to signal metadata.
-
-        ATR-based calculation:
-          SL = entry ± ATR * sl_atr_mult
-          TP = entry ± ATR * tp_atr_mult
-
-        For LONG:  SL below entry, TP above entry
-        For SHORT: SL above entry, TP below entry
-
-        Returns the same signal object (mutated in place).
+        Supports per-strategy overrides if defined in signal.metadata.
         """
         direction = signal.metadata.get("direction", "")
         if direction not in ("LONG", "SHORT"):
@@ -92,8 +84,9 @@ class BaseStrategy(ABC):
 
         # Get entry price (close of trigger candle)
         entry_price = float(window["close"].iloc[-1])
+        signal.metadata["entry_price"] = round(entry_price, 5)
 
-        # Compute ATR
+        # Compute ATR for fallback or reference
         if HAS_TALIB and len(window) >= atr_period + 1:
             high = window["high"].values.astype(np.float64)
             low = window["low"].values.astype(np.float64)
@@ -101,13 +94,25 @@ class BaseStrategy(ABC):
             atr = talib.ATR(high, low, close, timeperiod=atr_period)
             atr_value = float(atr[-1]) if not np.isnan(atr[-1]) else float(atr[~np.isnan(atr)][-1]) if any(~np.isnan(atr)) else 0.001
         else:
-            # Fallback: average range of last 14 candles
             ranges = window["high"].iloc[-atr_period:] - window["low"].iloc[-atr_period:]
             atr_value = float(ranges.mean()) if len(ranges) > 0 else 0.001
+        signal.metadata["atr"] = round(atr_value, 5)
 
-        # Calculate SL and TP
-        sl_distance = atr_value * sl_atr_mult
-        tp_distance = atr_value * tp_atr_mult
+        # 1. CHECK FOR STRATEGY-SPECIFIC STRUCTURAL OVERRIDES
+        if "stop_loss" in signal.metadata and "take_profit" in signal.metadata:
+            # Strategy already calculated absolute price levels
+            signal.metadata["stop_loss"] = round(signal.metadata["stop_loss"], 5)
+            signal.metadata["take_profit"] = round(signal.metadata["take_profit"], 5)
+            signal.metadata["sl_distance"] = round(abs(entry_price - signal.metadata["stop_loss"]), 5)
+            signal.metadata["tp_distance"] = round(abs(entry_price - signal.metadata["take_profit"]), 5)
+            return signal
+
+        # 2. CHECK FOR STRATEGY-SPECIFIC MULTIPLIER OVERRIDES
+        custom_sl_mult = signal.metadata.get("sl_atr_mult", sl_atr_mult)
+        custom_tp_mult = signal.metadata.get("tp_atr_mult", tp_atr_mult)
+
+        sl_distance = atr_value * custom_sl_mult
+        tp_distance = atr_value * custom_tp_mult
 
         if direction == "LONG":
             stop_loss = entry_price - sl_distance
@@ -116,10 +121,8 @@ class BaseStrategy(ABC):
             stop_loss = entry_price + sl_distance
             take_profit = entry_price - tp_distance
 
-        signal.metadata["entry_price"] = round(entry_price, 5)
         signal.metadata["stop_loss"] = round(stop_loss, 5)
         signal.metadata["take_profit"] = round(take_profit, 5)
-        signal.metadata["atr"] = round(atr_value, 5)
         signal.metadata["sl_distance"] = round(sl_distance, 5)
         signal.metadata["tp_distance"] = round(tp_distance, 5)
 

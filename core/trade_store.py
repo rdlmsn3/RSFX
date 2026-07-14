@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS trades (
     pnl_pips        REAL,
     mae_pips        REAL,
     mfe_pips        REAL,
-    bars_held       INTEGER,
+    ticks_held      INTEGER,
     risk_pips       REAL,
     reward_pips     REAL,
     rr_ratio        REAL,
@@ -198,7 +198,7 @@ def save_trades(
             d.get("pnl_pips", 0.0),
             d.get("mae_pips", 0.0),
             d.get("mfe_pips", 0.0),
-            d.get("bars_held", 0),
+            d.get("ticks_held", 0),
             d.get("risk_pips", 0.0),
             d.get("reward_pips", 0.0),
             d.get("rr_ratio", 0.0),
@@ -209,7 +209,7 @@ def save_trades(
         """INSERT INTO trades (
             run_id, strategy, direction, entry_time, entry_price,
             stop_loss, take_profit, exit_time, exit_price, exit_reason,
-            pnl_pips, mae_pips, mfe_pips, bars_held,
+            pnl_pips, mae_pips, mfe_pips, ticks_held,
             risk_pips, reward_pips, rr_ratio, signal_meta
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         rows,

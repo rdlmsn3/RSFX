@@ -76,8 +76,18 @@ class MarubozuTrendStrategy(BaseStrategy):
         ema_s_val = ema_s[-1]
 
         if body_pct >= self.body_ratio:
+            # Get immediate execution trigger data point
+            price_close = float(window["close"].iloc[-1])
+            candle_low = float(window["low"].iloc[-1])
+            candle_high = float(window["high"].iloc[-1])
+            candle_body = abs(float(window["close"].iloc[-1]) - float(window["open"].iloc[-1]))
+            buffer = 0.0001 # 1 pip micro-buffer
+
             if close[-1] > open_[-1] and ema_f_val > ema_s_val:
-                # Bullish marubozu
+                # === LONG SETUP ===
+                sl_price = candle_low - buffer
+                tp_price = price_close + (candle_body * 1.5) # Profit target targets 150% of the body size
+            
                 detected.append(PatternSignal(
                     name=f"{self.name}_LONG",
                     start_time=window.index[-1],
@@ -86,6 +96,8 @@ class MarubozuTrendStrategy(BaseStrategy):
                     metadata={
                         "strategy": self.name,
                         "direction": "LONG",
+                        "stop_loss": sl_price,
+                        "take_profit": tp_price,
                         "ema_fast": float(ema_f_val),
                         "ema_slow": float(ema_s_val),
                         "body_ratio": float(body_pct),
@@ -94,7 +106,10 @@ class MarubozuTrendStrategy(BaseStrategy):
                 logger.info("LONG signal at %s (strategy=%s)", current_timestamp, self.name)
 
             elif close[-1] < open_[-1] and ema_f_val < ema_s_val:
-                # Bearish marubozu
+                # === SHORT SETUP ===
+                sl_price = candle_high + buffer
+                tp_price = price_close - (candle_body * 1.5) # Profit target targets 150% of the body size
+            
                 detected.append(PatternSignal(
                     name=f"{self.name}_SHORT",
                     start_time=window.index[-1],
@@ -103,6 +118,8 @@ class MarubozuTrendStrategy(BaseStrategy):
                     metadata={
                         "strategy": self.name,
                         "direction": "SHORT",
+                        "stop_loss": sl_price,
+                        "take_profit": tp_price,
                         "ema_fast": float(ema_f_val),
                         "ema_slow": float(ema_s_val),
                         "body_ratio": float(body_pct),

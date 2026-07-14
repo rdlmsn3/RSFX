@@ -108,7 +108,16 @@ class H1TrendM5RsiStrategy(BaseStrategy):
         # ==============================================================
         # Confluence
         # ==============================================================
+        price_close = float(m5["close"].iloc[-1])
+        buffer = 0.0002  # 2 pips structural breathing room
+
         if h1_uptrend and rsi_bounce_long:
+            # === LONG SETUP ===
+            recent_m5_low = float(m5["low"].iloc[-12:].min())
+            sl_price = recent_m5_low - buffer
+            sl_distance = price_close - sl_price
+            tp_price = price_close + (sl_distance * 3.0)  # Strong 1:3 Multi-timeframe execution
+            
             detected.append(PatternSignal(
                 name=f"{self.name}_LONG",
                 start_time=m5.index[-1],
@@ -117,6 +126,8 @@ class H1TrendM5RsiStrategy(BaseStrategy):
                 metadata={
                     "strategy": self.name,
                     "direction": "LONG",
+                    "stop_loss": sl_price,
+                    "take_profit": tp_price,
                     "h1_ema_fast": h1_ema_f[-1],
                     "h1_ema_slow": h1_ema_s[-1],
                     "m5_rsi": m5_rsi[-1],
@@ -126,6 +137,12 @@ class H1TrendM5RsiStrategy(BaseStrategy):
             logger.info("LONG signal at %s (strategy=%s)", current_timestamp, self.name)
 
         elif h1_downtrend and rsi_bounce_short:
+            # === SHORT SETUP ===
+            recent_m5_high = float(m5["high"].iloc[-12:].max())
+            sl_price = recent_m5_high + buffer
+            sl_distance = sl_price - price_close
+            tp_price = price_close - (sl_distance * 3.0)  # Strong 1:3 Multi-timeframe execution
+            
             detected.append(PatternSignal(
                 name=f"{self.name}_SHORT",
                 start_time=m5.index[-1],
@@ -134,6 +151,8 @@ class H1TrendM5RsiStrategy(BaseStrategy):
                 metadata={
                     "strategy": self.name,
                     "direction": "SHORT",
+                    "stop_loss": sl_price,
+                    "take_profit": tp_price,
                     "h1_ema_fast": h1_ema_f[-1],
                     "h1_ema_slow": h1_ema_s[-1],
                     "m5_rsi": m5_rsi[-1],

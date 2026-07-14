@@ -88,7 +88,10 @@ class EmaRibbonPullbackStrategy(BaseStrategy):
         bearish_candle = price_close < price_open
 
         # Long: bullish alignment + pullback to EMA13 + bullish candle
+        price_close = float(window["close"].iloc[-1])
+
         if bullish_alignment and pullback and price_close >= ema13_val and bullish_candle:
+            # === LONG SETUP ===
             detected.append(PatternSignal(
                 name=f"{self.name}_LONG",
                 start_time=window.index[-3],
@@ -97,17 +100,19 @@ class EmaRibbonPullbackStrategy(BaseStrategy):
                 metadata={
                     "strategy": self.name,
                     "direction": "LONG",
+                    "sl_atr_mult": 2.5,  # Increased to guarantee clear room below EMA 21
+                    "tp_atr_mult": 5.0,  # Loose extension to run with the macro trend
                     "ema5": float(ema5),
                     "ema8": float(ema8),
                     "ema13": float(ema13_val),
                     "ema21": float(ema21),
-                    "price": float(price_close),
+                    "price": price_close,
                 },
             ))
             logger.info("LONG signal at %s (strategy=%s)", current_timestamp, self.name)
 
-        # Short: bearish alignment + pullback to EMA13 + bearish candle
         elif bearish_alignment and pullback and price_close <= ema13_val and bearish_candle:
+            # === SHORT SETUP ===
             detected.append(PatternSignal(
                 name=f"{self.name}_SHORT",
                 start_time=window.index[-3],
@@ -116,11 +121,13 @@ class EmaRibbonPullbackStrategy(BaseStrategy):
                 metadata={
                     "strategy": self.name,
                     "direction": "SHORT",
+                    "sl_atr_mult": 2.5,  # Increased to guarantee clear room above EMA 21
+                    "tp_atr_mult": 5.0,  # Loose extension to run with the macro trend
                     "ema5": float(ema5),
                     "ema8": float(ema8),
                     "ema13": float(ema13_val),
                     "ema21": float(ema21),
-                    "price": float(price_close),
+                    "price": price_close,
                 },
             ))
             logger.info("SHORT signal at %s (strategy=%s)", current_timestamp, self.name)

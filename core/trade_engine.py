@@ -31,14 +31,13 @@ Usage:
 
 from __future__ import annotations
 import logging
-import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
 import pandas as pd
 
 from core.event_bus import EventBus
-from core.engine import compute_pnl, apply_spread, check_min_rr, check_dedup, update_equity
+from core.engine import check_min_rr, check_dedup, update_equity
 from core.events import SignalEvent, TradeEvent
 
 logger = logging.getLogger(__name__)
@@ -56,6 +55,8 @@ class TradeConfig:
     min_rr: float = 1.0
     use_sr: bool = False
     max_lookback: int = 100
+    max_entry_drift_pct: float = 1.0        # max drift as % of risk distance (0.5 = 50%)
+    max_entry_slippage_pips: float = 5.0    # absolute cap, 0 = disabled
 
 
 @dataclass
@@ -84,7 +85,8 @@ class TradeRecord:
     def to_dict(self) -> dict:
         return {
             "id": self.id,
-            "strategy": self.strategy,
+            "strategy": self.strategy,     # Fixed: Required by trade_store.py for SQLite
+            "strategies": self.strategy,   # Kept: Safe fallback in case your UI expects this key
             "direction": self.direction,
             "entry_time": str(self.entry_time) if self.entry_time else "",
             "entry_price": self.entry_price,
@@ -160,6 +162,7 @@ class TradeEngine:
     def __init__(self, config: TradeConfig, event_bus: EventBus | None = None) -> None:
         self.config = config
         self._bus = event_bus
+        self._order_counter: int = 0
         self._open: Optional[OpenPosition] = None
         self._pending: Optional[PendingOrder] = None
         self._trades: list[TradeRecord] = []
@@ -183,7 +186,7 @@ class TradeEngine:
 
     @property
     def trades(self) -> list[TradeRecord]:
-        return list(self._trades)
+        return self._trades
 
     @property
     def open_position(self) -> Optional[OpenPosition]:
@@ -195,7 +198,7 @@ class TradeEngine:
 
     @property
     def balance_curve(self) -> list[float]:
-        return list(self._balance_curve)
+        return self._balance_curve
 
     @property
     def max_drawdown(self) -> float:
@@ -248,8 +251,9 @@ class TradeEngine:
         risk_pips = abs(entry - sl) / self.config.pip_value
         reward_pips = abs(tp - entry) / self.config.pip_value
 
+        self._order_counter += 1
         self._pending = PendingOrder(
-            id=str(uuid.uuid4())[:8],
+            id=f'o{self._order_counter}',
             strategy=signal.strategy_name,
             direction=direction,
             queued_time=signal.timestamp,
@@ -285,6 +289,9 @@ class TradeEngine:
         "the very next tick after queuing," it just happens to coincide
         with an exit.
         """
+        if self._open is None and self._pending is None:
+            return None
+
         closed: Optional[TradeRecord] = None
 
         if self._open is not None:
@@ -324,6 +331,7 @@ class TradeEngine:
         self._peak_balance = self.config.initial_balance
         self._max_dd = 0.0
         self._realized_pnl = 0.0
+        self._order_counter = 0
         self._last_entry_price = None
 
     # ------------------------------------------------------------------
@@ -334,12 +342,30 @@ class TradeEngine:
         order = self._pending
         assert order is not None
 
-        fill_price = ask if order.direction == "LONG" else bid
+        fill_price = ask if order.direction == "SHORT" else bid
+
+        # Entry drift guards — if price moved too far from the signal's
+        # intended entry, the setup is dead. Don't enter.
+        pip = self.config.pip_value
+        drift_pips = abs(fill_price - order.intended_entry) / pip
+
+        # Guard 1: relative to risk distance — drift can't exceed N% of SL distance
+        if order.risk_pips > 0 and drift_pips > order.risk_pips * self.config.max_entry_drift_pct:
+            logger.debug("entry drift guard: drift=%.1f pips > %.0f%% of risk=%.1f pips — dropping order",
+                         drift_pips, self.config.max_entry_drift_pct * 100, order.risk_pips)
+            self._pending = None
+            return
+
+        # Guard 2: absolute cap — hard limit regardless of R:R (0 = disabled)
+        if self.config.max_entry_slippage_pips > 0 and drift_pips > self.config.max_entry_slippage_pips:
+            logger.debug("absolute slippage guard: drift=%.1f pips > cap=%.1f pips — dropping order",
+                         drift_pips, self.config.max_entry_slippage_pips)
+            self._pending = None
+            return
 
         # Re-anchor: preserve the *distances*, not the absolute levels,
         # so R:R survives whatever slippage happened between the signal
         # candle close and this real fill.
-        pip = self.config.pip_value
         if order.direction == "LONG":
             sl = fill_price - order.risk_pips * pip
             tp = fill_price + order.reward_pips * pip
@@ -371,37 +397,44 @@ class TradeEngine:
     def _check_exit(self, bid: float, ask: float, timestamp: pd.Timestamp) -> Optional[TradeRecord]:
         pos = self._open
         pos.tick_count += 1
+        pip_value = self.config.pip_value
 
         if pos.direction == "LONG":
-            adverse = (bid - pos.entry_price) / self.config.pip_value
-            favorable = (bid - pos.entry_price) / self.config.pip_value
+            # You sell to exit — use bid price
+            adverse = (bid - pos.entry_price) / pip_value
+            favorable = (bid - pos.entry_price) / pip_value
             pos.mae = min(pos.mae, adverse)
             pos.mfe = max(pos.mfe, favorable)
             if bid <= pos.stop_loss:
-                return self._close(pos.stop_loss, timestamp, "SL")
+                return self._close(bid, timestamp, "SL")
             if bid >= pos.take_profit:
-                return self._close(pos.take_profit, timestamp, "TP")
+                return self._close(bid, timestamp, "TP")
         else:
-            adverse = (pos.entry_price - ask) / self.config.pip_value
-            favorable = (pos.entry_price - ask) / self.config.pip_value
+            # You buy to cover — use ask price
+            adverse = (pos.entry_price - ask) / pip_value
+            favorable = (pos.entry_price - ask) / pip_value
             pos.mae = min(pos.mae, adverse)
             pos.mfe = max(pos.mfe, favorable)
             if ask >= pos.stop_loss:
-                return self._close(pos.stop_loss, timestamp, "SL")
+                return self._close(ask, timestamp, "SL")
             if ask <= pos.take_profit:
-                return self._close(pos.take_profit, timestamp, "TP")
+                return self._close(ask, timestamp, "TP")
         return None
 
     def _close(self, exit_price: float, timestamp: pd.Timestamp, reason: str) -> TradeRecord:
         pos = self._open
         assert pos is not None
+        pip_value = self.config.pip_value
 
-        pnl = compute_pnl(pos.direction, pos.entry_price, exit_price, self.config.pip_value)
+        if pos.direction == "LONG":
+            pnl = (exit_price - pos.entry_price) / pip_value
+        else:
+            pnl = (pos.entry_price - exit_price) / pip_value
+
         spread_cost = self.config.spread_pips + self.config.slippage_pips
-        net_pnl = apply_spread(pnl, spread_cost)
-
-        risk = abs(pos.entry_price - pos.stop_loss) / self.config.pip_value
-        reward = abs(pos.take_profit - pos.entry_price) / self.config.pip_value
+        net_pnl = pnl - spread_cost
+        risk = abs(pos.entry_price - pos.stop_loss) / pip_value
+        reward = abs(pos.take_profit - pos.entry_price) / pip_value
 
         trade = TradeRecord(
             id=pos.id, strategy=pos.strategy, direction=pos.direction,

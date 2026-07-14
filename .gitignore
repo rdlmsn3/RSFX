@@ -25,3 +25,9 @@ data/*.pq
 *.db
 results/trades.db
 data/test_small_ticks.csv
+
+__pycache__/
+*.pyc
+a/
+test.csv
+my_output_file.csv

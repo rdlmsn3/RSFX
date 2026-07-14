@@ -79,7 +79,8 @@ class IncrementalCandleBuilder:
 
         If an EventBus is connected, publishes BarEvent on candle close.
         """
-        ts = pd.Timestamp(ts)
+        if not isinstance(ts, pd.Timestamp):
+            ts = pd.Timestamp(ts)
         mid = (bid + ask) / 2.0
         bucket = ts.floor(self._freq)
 
@@ -170,12 +171,12 @@ class StreamingCandleArrays:
 
     def _rebuild(self) -> None:
         self._cache = {
-            "timestamps": np.array(self._ts),
-            "opens": np.array(self._o, dtype=float),
-            "highs": np.array(self._h, dtype=float),
-            "lows": np.array(self._l, dtype=float),
-            "closes": np.array(self._c, dtype=float),
-            "volumes": np.array(self._v, dtype=float),
+            "timestamps": np.fromiter(self._ts, dtype="datetime64[ns]", count=len(self._ts)),
+            "opens": np.fromiter(self._o, dtype=float, count=len(self._o)),
+            "highs": np.fromiter(self._h, dtype=float, count=len(self._h)),
+            "lows": np.fromiter(self._l, dtype=float, count=len(self._l)),
+            "closes": np.fromiter(self._c, dtype=float, count=len(self._c)),
+            "volumes": np.fromiter(self._v, dtype=float, count=len(self._v)),
         }
         self._dirty = False
 

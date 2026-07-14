@@ -91,8 +91,9 @@ class HistDataAdapter(DataAdapter):
         "vol":    "volume",
     }
 
-    def __init__(self) -> None:
+    def __init__(self, swap_bid_ask: bool = False) -> None:
         self.raw_ticks: pd.DataFrame | None = None
+        self.swap_bid_ask = swap_bid_ask
 
     def load(self, path: str) -> pd.DataFrame:
         file_path = Path(path)
@@ -270,6 +271,11 @@ class HistDataAdapter(DataAdapter):
         for col in ["bid", "ask", "volume"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
+        # Swap bid/ask if data has inverted convention (e.g. Bid > Ask)
+        if self.swap_bid_ask:
+            df["bid"], df["ask"] = df["ask"].copy(), df["bid"].copy()
+            logger.info("Swapped bid↔ask columns (swap_bid_ask=True)")
+
         before = len(df)
         df.dropna(subset=["bid", "ask"], inplace=True)
         dropped = before - len(df)
@@ -319,10 +325,12 @@ class ParquetAdapter(DataAdapter):
         self,
         datetime_col: str | None = None,
         column_map: dict[str, str] | None = None,
+        swap_bid_ask: bool = False,
     ) -> None:
         self.datetime_col = datetime_col
         self.column_map = column_map or {}
         self.raw_ticks: pd.DataFrame | None = None
+        self.swap_bid_ask = swap_bid_ask
 
     def load(self, path: str) -> pd.DataFrame:
         file_path = Path(path)
@@ -499,6 +507,11 @@ class ParquetAdapter(DataAdapter):
             else:
                 df[col] = 0 if col == "volume" else None
 
+        # Swap bid/ask if data has inverted convention (e.g. Bid > Ask)
+        if self.swap_bid_ask:
+            df["bid"], df["ask"] = df["ask"].copy(), df["bid"].copy()
+            logger.info("Swapped bid↔ask columns (swap_bid_ask=True)")
+
         before = len(df)
         df.dropna(subset=["bid", "ask"], inplace=True)
         dropped = before - len(df)
@@ -528,7 +541,7 @@ class ParquetAdapter(DataAdapter):
 # Adapter factory — picks the right adapter by file extension
 # ---------------------------------------------------------------------------
 
-def get_adapter(path: str) -> DataAdapter:
+def get_adapter(path: str, swap_bid_ask: bool = False) -> DataAdapter:
     """
     Return the appropriate DataAdapter for *path* based on file extension.
 
@@ -540,8 +553,8 @@ def get_adapter(path: str) -> DataAdapter:
     """
     ext = Path(path).suffix.lower()
     if ext in (".parquet", ".pq", ".parq"):
-        return ParquetAdapter()
-    return HistDataAdapter()
+        return ParquetAdapter(swap_bid_ask=swap_bid_ask)
+    return HistDataAdapter(swap_bid_ask=swap_bid_ask)
 
 
 # ---------------------------------------------------------------------------
@@ -610,11 +623,13 @@ class TickDataAdapter(DataAdapter):
         bid_col: str = "bid",
         ask_col: str = "ask",
         volume_col: str = "volume",
+        swap_bid_ask: bool = False,
     ) -> None:
         self.timestamp_col = timestamp_col
         self.bid_col = bid_col
         self.ask_col = ask_col
         self.volume_col = volume_col
+        self.swap_bid_ask = swap_bid_ask
 
     def load(self, path: str) -> pd.DataFrame:
         from core.tick_candle_builder import TickCandleBuilder
@@ -699,6 +714,11 @@ class TickDataAdapter(DataAdapter):
             df[self.volume_col] = pd.to_numeric(df[self.volume_col], errors="coerce").fillna(0)
         else:
             df[self.volume_col] = 0
+
+        # Swap bid/ask if data has inverted convention (e.g. Bid > Ask)
+        if self.swap_bid_ask:
+            df[self.bid_col], df[self.ask_col] = df[self.ask_col].copy(), df[self.bid_col].copy()
+            logger.info("Swapped bid↔ask columns (swap_bid_ask=True)")
 
         # Drop rows with NaN prices
         before = len(df)

@@ -77,7 +77,16 @@ class TweezerReversalStrategy(BaseStrategy):
         # Tweezer top: bearish confirmation (second candle closes lower)
         is_tweezer_top = high_within_tolerance and (close[-1] < close[-2])
 
+# Get immediate execution trigger data point
+        price_close = float(window["close"].iloc[-1])
+        buffer = 0.0002  # 2 pips protection layer against spreads
+
         if is_tweezer_bottom and ema_f_val > ema_s_val:
+            # === LONG SETUP ===
+            tweezer_low = min(window["low"].iloc[-1], window["low"].iloc[-2])
+            sl_price = tweezer_low - buffer
+            tp_price = price_close + (price_close - sl_price) * 2.0  # 1:2 Risk/Reward
+            
             detected.append(PatternSignal(
                 name=f"{self.name}_LONG",
                 start_time=window.index[-2],
@@ -86,6 +95,8 @@ class TweezerReversalStrategy(BaseStrategy):
                 metadata={
                     "strategy": self.name,
                     "direction": "LONG",
+                    "stop_loss": sl_price,
+                    "take_profit": tp_price,
                     "ema_fast": float(ema_f_val),
                     "ema_slow": float(ema_s_val),
                     "low_diff": float(low_diff),
@@ -94,6 +105,11 @@ class TweezerReversalStrategy(BaseStrategy):
             logger.info("LONG signal at %s (strategy=%s)", current_timestamp, self.name)
 
         elif is_tweezer_top and ema_f_val < ema_s_val:
+            # === SHORT SETUP ===
+            tweezer_high = max(window["high"].iloc[-1], window["high"].iloc[-2])
+            sl_price = tweezer_high + buffer
+            tp_price = price_close - (sl_price - price_close) * 2.0  # 1:2 Risk/Reward
+            
             detected.append(PatternSignal(
                 name=f"{self.name}_SHORT",
                 start_time=window.index[-2],
@@ -102,6 +118,8 @@ class TweezerReversalStrategy(BaseStrategy):
                 metadata={
                     "strategy": self.name,
                     "direction": "SHORT",
+                    "stop_loss": sl_price,
+                    "take_profit": tp_price,
                     "ema_fast": float(ema_f_val),
                     "ema_slow": float(ema_s_val),
                     "high_diff": float(high_diff),
